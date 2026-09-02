@@ -1,9 +1,11 @@
-//! All menus: main menu, the account screens (log in, create account, verification, forgot /
-//! reset password, profile), the matchmaking queue, "waiting for opponent", the in-game pause
-//! overlay (Esc) and the settings screen. Screens are described by the `UiScreen` resource; the UI
-//! is rebuilt whenever it changes. Styling comes from `theme` (TF2 fonts, palette and panels).
+//! All menus: the title screen (main menu and leaderboard, switched by the bookmark tabs on the
+//! panel's edge), the account screens (log in, create account, verification, forgot / reset
+//! password, profile), the matchmaking queues (quick play, competitive), "waiting for opponent",
+//! the in-game pause overlay (Esc) and the settings screen. Screens are described by the
+//! `UiScreen` resource; the UI is rebuilt whenever it changes. Styling comes from `theme` (TF2
+//! fonts, palette and panels).
 
-use crate::account::{Account, Ending, HistoryEntry, Rating, RankedResult, Stats};
+use crate::account::{Account, Ending, HistoryEntry, LeaderboardEntry, QueueKind, Rating, RankedResult, Stats};
 use crate::config::{ClientConfig, ROOM_CODE_LEN, code_from_text, normalize_room_code};
 use crate::loading::StartupDone;
 use crate::net::{LOBBY_TIMEOUT_MINUTES, MatchKind, NetCommand, RoomConnection, RoomFailure, SignalingStatus};
@@ -20,6 +22,7 @@ use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::text::LineBreak;
 use bevy::ui::UiGlobalTransform;
+use bevy::ui::widget::NodeImageMode;
 use bevy::window::PrimaryWindow;
 
 /// Which screen is showing.
@@ -28,6 +31,8 @@ pub enum UiScreen {
     #[default]
     Hidden,
     Main,
+    /// The title screen's second tab: the top players by rating.
+    Leaderboard,
     Pause,
     Settings {
         /// Opened from the pause menu (true) or the main menu (false).
@@ -43,7 +48,7 @@ pub enum UiScreen {
     Profile,
     ChangeUsername,
     ChangePassword,
-    /// In the matchmaking queue.
+    /// In a matchmaking queue (which one: `Account::queue`).
     Queue,
     /// The desktop builds (reachable from the web build's title screen).
     Download,
@@ -78,6 +83,25 @@ pub struct ReturnScreen(pub Option<UiScreen>);
 #[derive(Resource, Default)]
 pub struct UiRefresh(pub bool);
 
+/// The main menu's panel, whose size the other title tabs copy.
+#[derive(Component)]
+struct TitlePanel;
+
+/// Size of the main menu's panel (logical pixels), as last laid out. The leaderboard panel is
+/// built to the same size, so switching tabs moves nothing: the frame stays put and only its
+/// contents change.
+#[derive(Resource, Default)]
+struct TitlePanelSize(Option<Vec2>);
+
+/// The leaderboard's table box, whose height says how many players fit on a page.
+#[derive(Component)]
+struct LeaderboardTable;
+
+/// Players that fit on a leaderboard page, from the table box as last laid out; none until the
+/// tab has been shown.
+#[derive(Resource, Default)]
+struct LeaderboardRows(Option<u32>);
+
 /// Waiting for the next key/mouse press to bind this action.
 #[derive(Resource, Default)]
 pub struct Listening(pub Option<Action>);
@@ -101,7 +125,10 @@ enum UiAction {
     Practice,
     CreateRoom,
     JoinRoom,
-    FindGame,
+    /// Join the quick play queue (anyone).
+    QuickPlay,
+    /// Join the competitive queue (accounts only).
+    Competitive,
     CancelQueue,
     OpenSettings,
     Back,
@@ -147,6 +174,10 @@ enum UiAction {
     Download(Platform),
     /// This build is out of date: reload the page (web) or hand off to the updater (desktop).
     Update,
+    /// One of the bookmark tabs on the title panel's edge.
+    OpenTab(Tab),
+    /// Another page of the leaderboard (from 1).
+    LeaderboardPage(u32),
 }
 
 impl UiAction {
@@ -154,7 +185,7 @@ impl UiAction {
     fn style(self) -> ButtonStyle {
         match self {
             UiAction::EditValue(_) | UiAction::OpenProfile | UiAction::BackArrow => ButtonStyle::Subtle,
-            UiAction::InvertY | UiAction::SeparateSensitivity | UiAction::Fullscreen => ButtonStyle::Custom,
+            UiAction::InvertY | UiAction::SeparateSensitivity | UiAction::Fullscreen | UiAction::OpenTab(_) => ButtonStyle::Custom,
             _ => ButtonStyle::Plain,
         }
     }
@@ -188,6 +219,59 @@ impl Platform {
     }
 }
 
+/// The bookmark tabs hanging off the right edge of the title screen's panel, top to bottom. The
+/// tab of the page being shown has no border against the panel: the panel opens into it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    Menu,
+    Leaderboard,
+}
+
+impl Tab {
+    const ALL: [Tab; 2] = [Tab::Menu, Tab::Leaderboard];
+
+    fn screen(self) -> UiScreen {
+        match self {
+            Tab::Menu => UiScreen::Main,
+            Tab::Leaderboard => UiScreen::Leaderboard,
+        }
+    }
+
+    /// What the tab says when hovered.
+    fn name(self) -> &'static str {
+        match self {
+            Tab::Menu => "menu",
+            Tab::Leaderboard => "leaderboard",
+        }
+    }
+}
+
+/// A tab's icon: its tint at rest and while the tab is hovered.
+#[derive(Component)]
+struct TabIcon {
+    rest: Color,
+    hover: Color,
+}
+
+/// A bookmark tab. `off`: not the current page, so it can be opened (and lights up under the
+/// mouse); the current one only shows its name.
+#[derive(Component)]
+struct TabNode {
+    off: bool,
+}
+
+/// Tab geometry, logical pixels. The images are drawn to these proportions (`tools/tf2/ui_assets.py`).
+const TAB_W: f32 = 46.0;
+const TAB_H: f32 = 64.0;
+const TAB_GAP: f32 = 3.0;
+/// Distance from the panel's top to the first tab.
+const TAB_TOP: f32 = 18.0;
+const TAB_ICON: f32 = 28.0;
+/// The panel's border (`theme::panel`), which the selected tab lies over.
+const PANEL_BORDER: f32 = 2.0;
+/// Brightening of a tab's artwork under the mouse.
+const TAB_HOVER_TINT: Color = Color::srgb(1.25, 1.25, 1.25);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonStyle {
     Plain,
@@ -218,9 +302,13 @@ struct QueueText;
 #[derive(Component)]
 struct QueueSizeText;
 
-/// The "(N playing)" label inside the main menu's "Find game" button.
+/// The "(N players)" label inside the main menu's "Quick play" / "Competitive" button.
 #[derive(Component)]
-struct PlayingText;
+struct CountText(QueueKind);
+
+/// The "N players online" line under the logo.
+#[derive(Component)]
+struct OnlineText;
 
 /// Slider parts.
 #[derive(Component)]
@@ -262,6 +350,8 @@ impl Plugin for MenuPlugin {
             .init_resource::<Editing>()
             .init_resource::<PendingPaste>()
             .init_resource::<ReturnScreen>()
+            .init_resource::<TitlePanelSize>()
+            .init_resource::<LeaderboardRows>()
             .add_systems(OnEnter(AppState::Menu), enter_menu)
             .add_systems(OnExit(AppState::Menu), leave_menu)
             .add_systems(OnEnter(AppState::InGame), |mut s: ResMut<UiScreen>| *s = UiScreen::Hidden)
@@ -276,6 +366,7 @@ impl Plugin for MenuPlugin {
                     escape_key,
                     capture_binding,
                     ui_buttons,
+                    tab_hover,
                     form_submit,
                     slider_drag,
                     paste_shortcut.run_if(in_state(AppState::Menu)),
@@ -287,11 +378,13 @@ impl Plugin for MenuPlugin {
                     sync_settings_widgets,
                     disabled_tooltips,
                     queue_status,
-                    playing_count,
+                    activity_counts,
                     resend_timer,
                 )
                     .chain(),
             )
+            // Reads last frame's layout, so it needs no place in the chain (which is full anyway).
+            .add_systems(Update, (measure_title_panel, leaderboard_fetch).chain().run_if(in_state(AppState::Menu)))
             .add_systems(OnEnter(AppState::Connecting), setup_connecting)
             .add_systems(OnExit(AppState::Connecting), despawn_ui)
             .add_systems(Update, (connecting_phase, connecting_screen, connecting_keys).run_if(in_state(AppState::Connecting)));
@@ -528,6 +621,13 @@ fn toggle(theme: &Theme, on: bool, action: UiAction) -> impl Bundle {
 
 // ------------------------------------------------------------------------------------ screens
 
+/// The last of `rebuild_ui`'s inputs, bundled: a system takes at most sixteen parameters.
+#[derive(SystemParam)]
+struct RebuildExtras<'w> {
+    cfg: Res<'w, ClientConfig>,
+    panel_size: Res<'w, TitlePanelSize>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rebuild_ui(
     mut commands: Commands,
@@ -545,6 +645,7 @@ fn rebuild_ui(
     panes: Query<&ScrollPosition, With<ScrollPane>>,
     state: Res<State<AppState>>,
     time: Res<Time<Real>>,
+    extra: RebuildExtras,
 ) {
     if !screen.is_changed() && !refresh.0 {
         return;
@@ -568,7 +669,7 @@ fn rebuild_ui(
             UiScreen::ChangePassword => Some(Field::CurrentPassword),
             _ => None,
         };
-        if *screen == UiScreen::Main {
+        if matches!(*screen, UiScreen::Main | UiScreen::Leaderboard) {
             form.set(Field::AnonName, account.anon_name.clone());
         }
     }
@@ -578,6 +679,7 @@ fn rebuild_ui(
     match *screen {
         UiScreen::Hidden => {}
         UiScreen::Main => spawn_main(&mut commands, &theme, &typed, &settings, &status, &account, &form),
+        UiScreen::Leaderboard => spawn_leaderboard(&mut commands, &theme, &account, &form, extra.panel_size.0),
         UiScreen::Pause => spawn_pause(&mut commands, &theme),
         UiScreen::Settings { from_game } => spawn_settings(&mut commands, &theme, &settings, listening.0, from_game, scroll),
         UiScreen::Login => spawn_login(&mut commands, &theme, &account, &form),
@@ -588,7 +690,7 @@ fn rebuild_ui(
         UiScreen::Profile => spawn_profile(&mut commands, &theme, &account, scroll),
         UiScreen::ChangeUsername => spawn_change_username(&mut commands, &theme, &account, &form),
         UiScreen::ChangePassword => spawn_change_password(&mut commands, &theme, &account, &form),
-        UiScreen::Queue => spawn_queue(&mut commands, &theme, &account),
+        UiScreen::Queue => spawn_queue(&mut commands, &theme, &account, &extra.cfg),
         UiScreen::Download => spawn_download(&mut commands, &theme),
     }
 }
@@ -631,12 +733,35 @@ fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: 
     e.id()
 }
 
-/// "(N playing)" inside "Find game", or nothing while the count is unknown.
-fn playing_label(stats: Option<Stats>) -> String {
+/// "(N players)" inside a queue button: everyone in a game of that kind or waiting for one.
+/// Nothing while the count is unknown.
+fn count_label(stats: Option<Stats>, kind: QueueKind) -> String {
+    let Some(s) = stats else { return String::new() };
+    let n = match kind {
+        QueueKind::Competitive => s.competitive.total(),
+        QueueKind::Quick => s.quick.total(),
+    };
+    format!("({n} players)")
+}
+
+/// "N players online" under the logo: every connected client, whatever it is doing. Nothing while
+/// the count is unknown.
+fn online_label(stats: Option<Stats>) -> String {
     match stats {
-        Some(s) => format!("({} playing)", s.playing),
+        Some(Stats { online: 1, .. }) => "1 player online".to_string(),
+        Some(s) => format!("{} players online", s.online),
         None => String::new(),
     }
+}
+
+/// The small "(N players)" text inside a queue button, right after its label.
+fn count_child(c: &mut RelatedSpawnerCommands<ChildOf>, button: Entity, theme: &Theme, stats: Option<Stats>, kind: QueueKind) {
+    c.commands().entity(button).with_child((
+        CountText(kind),
+        theme.heading_flat(count_label(stats, kind), 12.0, theme::BTN_TEXT),
+        no_wrap(),
+        Node { margin: UiRect::left(Val::Px(8.0)), ..default() },
+    ));
 }
 
 /// Top-right corner of the title screen: who you are. Logged in: the class icon and the account
@@ -679,23 +804,39 @@ fn spawn_identity(p: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, accoun
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Settings, status: &SignalingStatus, account: &Account, form: &Form) {
-    let root = screen_root(commands, theme, false);
-    let offline = if status.is_outdated() {
-        Some(if cfg!(target_arch = "wasm32") {
-            "this build is out of date: reload the page (Ctrl+Shift+R)."
-        } else {
-            "this build is out of date: update the client."
-        })
-    } else if status.is_down() {
-        Some("cannot connect to matchmaking servers.")
-    } else {
-        None
-    };
-    let ranked_offline = offline.or((!account.logged_in()).then_some("log in to play matchmaking."));
+/// Height kept free for the error line between the logo and the panel, whether or not there is
+/// one, so a message appearing does not move the panel.
+const ERROR_SLOT_H: f32 = 22.0;
+
+/// The title screen, the same on each of its tabs: the backdrop, the corner furniture (build
+/// identity, identity corner, the download button on the web) and, in a column, the logo with
+/// the online count under it and the error slot. Returns that column; the caller adds its panel.
+///
+/// The column sits between two spacers that share the free height, which centres it while it
+/// fits. In a window too short for it the spacers are squeezed to nothing and the root's
+/// `JustifyContent::FlexEnd` keeps the column's bottom in view: the panel stays whole and the
+/// logo is what gets cut off at the top. (Auto margins would be the usual way to centre, but
+/// taffy 0.10 hands them the free space and then shifts the item to the end as well.)
+fn title_screen(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form) -> Entity {
+    let root = commands
+        .spawn((
+            UiRoot,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::FlexEnd,
+                align_items: AlignItems::Center,
+                padding: UiRect::all(Val::Px(SCREEN_MARGIN)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            GlobalZIndex(10),
+        ))
+        .id();
     commands.entity(root).with_children(|p| {
-        p.spawn((theme.heading("endif.tf", 96.0, theme::ORANGE), Node { margin: UiRect::bottom(Val::Px(14.0)), ..default() }));
+        // First child so it draws beneath everything; absolute, so it joins no layout.
+        p.spawn(theme.menu_backdrop());
         // Build identity in the corner, so two people can tell at a glance whether they match.
         p.spawn((
             theme.label(format!("build {}", endif_sim::protocol_id()), 11.0, theme::TAN_DARK),
@@ -708,22 +849,147 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
                 w.spawn(theme.button("download the desktop app", UiAction::OpenDownload, 220.0, 34.0, 12.0));
             });
         spawn_identity(p, theme, account, form);
-        if let Some(err) = &account.error {
-            p.spawn((theme.label(err.clone(), 14.0, theme::LIGHT_RED), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+    });
+    let spacer = || (Node { flex_grow: 1.0, flex_shrink: 1.0, flex_basis: Val::Px(0.0), min_height: Val::Px(0.0), ..default() }, ChildOf(root));
+    commands.spawn(spacer());
+    let column = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(6.0),
+                // Never squeezed: it overflows (at the top) rather than crushing its contents.
+                flex_shrink: 0.0,
+                ..default()
+            },
+            ChildOf(root),
+        ))
+        .id();
+    commands.spawn(spacer());
+    commands.entity(column).with_children(|p| {
+        // The logo, with the number of connected clients tucked under its right-hand end.
+        p.spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::FlexEnd, margin: UiRect::bottom(Val::Px(8.0)), ..default() })
+            .with_children(|l| {
+                l.spawn(theme.heading("endif.tf", 96.0, theme::ORANGE));
+                // The logo's line box leaves a lot of air under the glyphs; pull the line up into it.
+                l.spawn((OnlineText, theme.label(online_label(account.stats), 13.0, theme::OFF_WHITE), no_wrap(), Node { margin: UiRect { right: Val::Px(4.0), top: Val::Px(-14.0), ..default() }, ..default() }));
+            });
+        p.spawn(Node { min_height: Val::Px(ERROR_SLOT_H), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() })
+            .with_children(|s| {
+                s.spawn((theme.label(account.error.clone().unwrap_or_default(), 14.0, theme::LIGHT_RED), no_wrap()));
+            });
+    });
+    column
+}
+/// The bookmark tabs on the right edge of a title panel, `selected` being the page on show. They
+/// are absolute children of the panel, so the panel stays centred and the tabs jut out of it.
+/// Insets resolve inside the border: at `left: 100%` a tab starts on the inner edge of the
+/// panel's right border, so the selected one lies over that border and the panel opens into
+/// it; the others step past it and keep the border between them and the panel.
+fn spawn_tabs(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, selected: Tab) {
+    for (i, tab) in Tab::ALL.into_iter().enumerate() {
+        let on = tab == selected;
+        let (image, icon, rest, hover) = match tab {
+            Tab::Menu => (theme.tf2_logo.clone(), TAB_ICON, if on { theme::TAN_LIGHT } else { theme::TAN_DARK }, theme::TAN_LIGHT),
+            Tab::Leaderboard => (theme.trophy.clone(), TAB_ICON + 4.0, if on { Color::WHITE } else { Color::srgb(0.6, 0.6, 0.6) }, Color::WHITE),
+        };
+        let mut e = c.spawn((
+            TabNode { off: !on },
+            // Hover tracking; the page on show is not a button (nothing to open, no sounds).
+            Interaction::default(),
+            ImageNode { image: if on { theme.tab_on.clone() } else { theme.tab_off.clone() }, image_mode: NodeImageMode::Stretch, ..default() },
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(100.0),
+                top: Val::Px(TAB_TOP + i as f32 * (TAB_H + TAB_GAP)),
+                // Both end the same distance out: the selected one also covers the border.
+                width: Val::Px(if on { TAB_W + PANEL_BORDER } else { TAB_W }),
+                height: Val::Px(TAB_H),
+                margin: UiRect::left(Val::Px(if on { 0.0 } else { PANEL_BORDER })),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ));
+        if !on {
+            // `ui_buttons` wants a `BackgroundColor`; the tab's look is its image, so it stays clear.
+            e.insert((Button, UiAction::OpenTab(tab), BackgroundColor(Color::NONE)));
         }
+        e.with_children(|t| {
+            t.spawn((TabIcon { rest, hover }, Theme::icon(image, icon, rest)));
+            // The tab's name, to its right while hovered.
+            t.spawn((
+                Tooltip,
+                Visibility::Hidden,
+                GlobalZIndex(10),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(100.0),
+                    top: Val::Px(0.0),
+                    bottom: Val::Px(0.0),
+                    margin: UiRect::left(Val::Px(8.0)),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+            ))
+            .with_children(|w| {
+                w.spawn((theme::panel(Node { padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)), ..default() }), children![(theme.label(tab.name(), 13.0, theme::OFF_WHITE), no_wrap())]));
+            });
+        });
+    }
+}
 
-        p.spawn(panel_column(18.0)).with_children(|c| {
+/// Shows a tab's name while the mouse is over it, and brightens an unselected tab and its icon.
+/// The tab's artwork sits on the entity with the `Interaction`, the icon and the name on its
+/// children; `TabNode` keeps the queries apart.
+fn tab_hover(
+    mut tabs: Query<(&Interaction, &Children, &mut ImageNode, &TabNode), Changed<Interaction>>,
+    mut icons: Query<(&TabIcon, &mut ImageNode), Without<TabNode>>,
+    mut tips: Query<&mut Visibility, With<Tooltip>>,
+) {
+    for (interaction, children, mut art, tab) in &mut tabs {
+        let hovered = *interaction != Interaction::None;
+        if tab.off {
+            art.color = if hovered { TAB_HOVER_TINT } else { Color::WHITE };
+        }
+        for child in children.iter() {
+            if let Ok((icon, mut node)) = icons.get_mut(child)
+                && tab.off
+            {
+                node.color = if hovered { icon.hover } else { icon.rest };
+            }
+            if let Ok(mut vis) = tips.get_mut(child) {
+                *vis = if hovered { Visibility::Visible } else { Visibility::Hidden };
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Settings, status: &SignalingStatus, account: &Account, form: &Form) {
+    let offline = if status.is_outdated() {
+        Some(if cfg!(target_arch = "wasm32") {
+            "this build is out of date: reload the page (Ctrl+Shift+R)."
+        } else {
+            "this build is out of date: update the client."
+        })
+    } else if status.is_down() {
+        Some("cannot connect to matchmaking servers.")
+    } else {
+        None
+    };
+    let ranked_offline = offline.or((!account.logged_in()).then_some("log in to play matchmaking."));
+    let column = title_screen(commands, theme, account, form);
+    commands.entity(column).with_children(|p| {
+        p.spawn((panel_column(18.0), TitlePanel)).with_children(|c| {
+            spawn_tabs(c, theme, Tab::Menu);
             if status.is_outdated() {
                 update_banner(c, theme);
             }
-            let find = online_button(c, theme, "Find game", UiAction::FindGame, ranked_offline);
-            // A second, smaller text inside the button, right after the label.
-            c.commands().entity(find).with_child((
-                PlayingText,
-                theme.heading_flat(playing_label(account.stats), 12.0, theme::BTN_TEXT),
-                no_wrap(),
-                Node { margin: UiRect::left(Val::Px(8.0)), ..default() },
-            ));
+            let quick = online_button(c, theme, "Quick play", UiAction::QuickPlay, offline);
+            count_child(c, quick, theme, account.stats, QueueKind::Quick);
+            let competitive = online_button(c, theme, "Competitive", UiAction::Competitive, ranked_offline);
+            count_child(c, competitive, theme, account.stats, QueueKind::Competitive);
             c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
             online_button(c, theme, "Create private room", UiAction::CreateRoom, offline);
 
@@ -753,7 +1019,6 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
                 });
                 r.spawn(small_button(theme, "paste", UiAction::Paste));
             });
-            c.spawn(theme.label("or Ctrl+V a code / invite link", 12.0, theme::TAN_DARK));
             if status.is_outdated() {
                 c.spawn((
                     theme.label(
@@ -765,15 +1030,13 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
                 ));
             }
             online_button(c, theme, "Join room", UiAction::JoinRoom, offline);
+            c.spawn(button(theme, "Settings", UiAction::OpenSettings));
 
-            c.spawn(Node { margin: UiRect::top(Val::Px(16.0)), ..default() }).with_children(|w| {
-                w.spawn(button(theme, "Settings", UiAction::OpenSettings));
-            });
-
-            // Master volume, always within reach from the title screen.
+            // Master volume, always within reach from the title screen. The slider's track has
+            // its own headroom above the bar, so the label sits right on top of it.
             c.spawn((
                 theme.heading_flat("VOLUME", 16.0, theme::TAN_LIGHT),
-                Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(14.0), Val::Px(2.0)), ..default() },
+                Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(-6.0)), ..default() },
             ));
             c.spawn(Node {
                 width: Val::Px(BUTTON_W),
@@ -788,6 +1051,167 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
     if let Some(result) = &account.result {
         spawn_result_popup(commands, theme, result);
     }
+}
+
+/// Leaderboard column widths: place, rating, record, win rate. The name takes what is left.
+const LB_COLS: [f32; 4] = [32.0, 48.0, 62.0, 44.0];
+const LB_GAP: f32 = 6.0;
+
+/// Height of a leaderboard row (and of the column headings).
+const LB_ROW_H: f32 = 26.0;
+/// Vertical padding inside the table box.
+const LB_PAD_Y: f32 = 6.0;
+/// Most players ever asked for on one page (the server caps it there too).
+const LB_ROWS_MAX: u32 = 50;
+
+/// A row of the leaderboard table, as wide as the panel's contents.
+fn lb_row() -> Node {
+    Node { width: Val::Percent(100.0), min_height: Val::Px(LB_ROW_H), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(LB_GAP), ..default() }
+}
+
+/// One line of the leaderboard: place, name, rating, record and win rate. `me` lights up the
+/// viewer's own line.
+fn leaderboard_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, e: &LeaderboardEntry, me: bool) {
+    let place = if e.rank == 1 { theme::YELLOW } else { theme::TAN_LIGHT };
+    let name = if me { theme::YELLOW } else { theme::OFF_WHITE };
+    c.spawn(lb_row()).with_children(|r| {
+        cell(r, LB_COLS[0], theme.heading_flat(format!("#{}", e.rank), 14.0, place), JustifyContent::FlexStart);
+        r.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), overflow: Overflow::clip(), ..default() }).with_children(|x| {
+            x.spawn((theme.label(e.username.clone(), 14.0, name), no_wrap()));
+        });
+        cell(r, LB_COLS[1], theme.heading_flat(e.elo.to_string(), 15.0, theme::TAN_LIGHT), JustifyContent::FlexEnd);
+        // Wins - losses, each in its colour.
+        r.spawn(Node { width: Val::Px(LB_COLS[2]), justify_content: JustifyContent::FlexEnd, column_gap: Val::Px(3.0), flex_shrink: 0.0, ..default() }).with_children(|x| {
+            x.spawn((theme.heading_flat(e.wins.to_string(), 13.0, theme::YELLOW), no_wrap()));
+            x.spawn((theme.heading_flat("-", 13.0, theme::TAN_DARK), no_wrap()));
+            x.spawn((theme.heading_flat(e.losses.to_string(), 13.0, theme::LIGHT_RED), no_wrap()));
+        });
+        cell(r, LB_COLS[3], theme.label(format!("{:.0}%", e.win_rate()), 13.0, theme::OFF_WHITE), JustifyContent::FlexEnd);
+    });
+}
+
+/// Records the main menu panel's size (`TitlePanelSize`) and, on the leaderboard tab, how many
+/// rows its table box has room for (`LeaderboardRows`), once they have been laid out.
+fn measure_title_panel(
+    panels: Query<&ComputedNode, With<TitlePanel>>,
+    tables: Query<&ComputedNode, With<LeaderboardTable>>,
+    mut size: ResMut<TitlePanelSize>,
+    mut rows: ResMut<LeaderboardRows>,
+) {
+    if let Some(node) = panels.iter().next()
+        && node.size.x > 0.0
+        && node.size.y > 0.0
+    {
+        let want = node.size * node.inverse_scale_factor;
+        if size.0 != Some(want) {
+            size.0 = Some(want);
+        }
+    }
+    if let Some(node) = tables.iter().next()
+        && node.size.y > 0.0
+    {
+        let inner = node.size.y * node.inverse_scale_factor - 2.0 * LB_PAD_Y - 4.0;
+        let want = ((inner / LB_ROW_H).floor() as u32).clamp(1, LB_ROWS_MAX);
+        if rows.0 != Some(want) {
+            rows.0 = Some(want);
+        }
+    }
+}
+
+/// Fetches the first page once the leaderboard tab has been laid out and its row count is known
+/// (opening the tab cannot ask before then). A failure leaves its message and does not retry.
+fn leaderboard_fetch(mut account: ResMut<Account>, screen: Res<UiScreen>, rows: Res<LeaderboardRows>, cfg: Res<ClientConfig>) {
+    let Some(per) = rows.0 else { return };
+    if *screen == UiScreen::Leaderboard && account.leaderboard.is_none() && account.error.is_none() && !account.loading_leaderboard() {
+        account.fetch_leaderboard(&cfg, 1, per);
+    }
+}
+
+/// The title screen's leaderboard tab: the top players by rating, in a panel the size of the
+/// main menu's (`size`), so the frame does not move when the tabs switch.
+fn spawn_leaderboard(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form, size: Option<Vec2>) {
+    let me = account.user.as_ref().map(|u| u.username.as_str());
+    let (width, height) = match size {
+        Some(s) => (Val::Px(s.x), Val::Px(s.y)),
+        // Never measured (cannot happen: the main menu comes first): the main panel's usual width.
+        None => (Val::Px(BUTTON_W + 48.0), Val::Auto),
+    };
+    let column = title_screen(commands, theme, account, form);
+    commands.entity(column).with_children(|p| {
+        p.spawn(theme::panel(Node {
+            width,
+            height,
+            // The main panel cannot shrink below its contents; this one must not shrink below
+            // its copied height either, or the two would sit differently in a short window.
+            flex_shrink: 0.0,
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(18.0)),
+            row_gap: Val::Px(4.0),
+            ..default()
+        }))
+        .with_children(|c| {
+            spawn_tabs(c, theme, Tab::Leaderboard);
+            c.spawn((theme.heading("LEADERBOARD", 30.0, theme::TAN_LIGHT), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+            // Column headings, lined up with the rows below (the box has 12 px of side padding).
+            c.spawn(Node { width: Val::Percent(100.0), padding: UiRect::horizontal(Val::Px(12.0)), ..default() }).with_children(|w| {
+                w.spawn(lb_row()).with_children(|r| {
+                    let head = |r: &mut RelatedSpawnerCommands<ChildOf>, w: f32, s: &str, j: JustifyContent| cell(r, w, theme.heading_flat(s, 11.0, theme::TAN_DARK), j);
+                    head(r, LB_COLS[0], "#", JustifyContent::FlexStart);
+                    r.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), ..default() }).with_children(|x| {
+                        x.spawn((theme.heading_flat("PLAYER", 11.0, theme::TAN_DARK), no_wrap()));
+                    });
+                    head(r, LB_COLS[1], "ELO", JustifyContent::FlexEnd);
+                    head(r, LB_COLS[2], "W - L", JustifyContent::FlexEnd);
+                    head(r, LB_COLS[3], "WIN %", JustifyContent::FlexEnd);
+                });
+            });
+            // The table fills the rest of the panel; its height decides the players to a page.
+            c.spawn((
+                LeaderboardTable,
+                theme::inset(Node {
+                    width: Val::Percent(100.0),
+                    flex_grow: 1.0,
+                    min_height: Val::Px(LB_ROW_H + 2.0 * LB_PAD_Y + 4.0),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::axes(Val::Px(12.0), Val::Px(LB_PAD_Y)),
+                    overflow: Overflow::clip(),
+                    ..default()
+                }),
+            ))
+            .with_children(|list| {
+                let note = |list: &mut RelatedSpawnerCommands<ChildOf>, s: &str| {
+                    list.spawn((theme.label(s, 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
+                };
+                match &account.leaderboard {
+                    Some(lb) if lb.players.is_empty() => note(list, "nobody has played a competitive match yet"),
+                    Some(lb) => {
+                        for e in &lb.players {
+                            leaderboard_row(list, theme, e, me == Some(e.username.as_str()));
+                        }
+                    }
+                    // A failure is on the error line above the panel.
+                    None if account.error.is_some() => note(list, ""),
+                    None => note(list, "loading..."),
+                }
+            });
+            // Page buttons: previous, "page N of M", next. The ends are greyed out.
+            let (page, pages) = account.leaderboard.as_ref().map(|lb| (lb.page, lb.pages)).unwrap_or((1, 1));
+            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), margin: UiRect::top(Val::Px(4.0)), ..default() })
+                .with_children(|r| {
+                    let mut prev = r.spawn(small_button(theme, "<", UiAction::LeaderboardPage(page.saturating_sub(1).max(1))));
+                    if page <= 1 {
+                        prev.insert((Disabled, BackgroundColor(BTN_DISABLED)));
+                    }
+                    r.spawn((theme.label(format!("page {page} of {pages}"), 13.0, theme::OFF_WHITE), no_wrap(), Node { min_width: Val::Px(90.0), justify_content: JustifyContent::Center, ..default() }));
+                    let mut next = r.spawn(small_button(theme, ">", UiAction::LeaderboardPage((page + 1).min(pages))));
+                    if page >= pages {
+                        next.insert((Disabled, BackgroundColor(BTN_DISABLED)));
+                    }
+                });
+        });
+    });
 }
 
 /// The popup over the main menu after a ranked match: how it ended and what it did to the rating.
@@ -1151,11 +1575,28 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
     let user = account.profile.as_ref().map(|p| &p.user).or(account.user.as_ref()).cloned().unwrap_or_default();
     let games = user.wins + user.losses;
     let rate = if games > 0 { format!("{:.0}% win rate", 100.0 * user.wins as f32 / games as f32) } else { "no ranked games yet".to_string() };
+    let rank = account.profile.as_ref().and_then(|p| p.rank);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(24.0)).with_children(|c| {
+            back_arrow(c, theme);
             c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(12.0), ..default() }).with_children(|r| {
                 r.spawn(theme.soldier_icon(40.0));
                 r.spawn((theme.heading(user.username.clone(), 40.0, theme::TAN_LIGHT), no_wrap()));
+                // The place on the leaderboard hangs off the right of the name, which stays centred.
+                if let Some(rank) = rank {
+                    r.spawn(Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Percent(100.0),
+                        top: Val::Px(0.0),
+                        bottom: Val::Px(0.0),
+                        margin: UiRect::left(Val::Px(14.0)),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|x| {
+                        x.spawn((theme.heading_flat(format!("(#{rank})"), 22.0, theme::YELLOW), no_wrap()));
+                    });
+                }
             });
             c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::FlexEnd, column_gap: Val::Px(24.0), margin: UiRect::vertical(Val::Px(8.0)), ..default() })
                 .with_children(|r| {
@@ -1183,7 +1624,7 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
             .with_children(|list| {
                 match account.profile.as_ref() {
                     Some(profile) if profile.matches.is_empty() => {
-                        list.spawn((theme.label("no matches yet: press Find game, or play a round in a room", 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
+                        list.spawn((theme.label("no matches yet: play a competitive match, or a round of quick play", 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
                     }
                     Some(profile) => {
                         for m in &profile.matches {
@@ -1202,17 +1643,21 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
                 b.spawn(form_button(theme, "change username", UiAction::OpenChangeUsername));
                 b.spawn(form_button(theme, "change password", UiAction::OpenChangePassword));
                 b.spawn(form_button(theme, "log out", UiAction::Logout));
-                b.spawn(form_button(theme, "back", UiAction::Back));
             });
         });
     });
 }
 
-fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account) {
+fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account, cfg: &ClientConfig) {
+    let kind = account.queue.as_ref().map(|q| q.kind).unwrap_or(QueueKind::Competitive);
     let root = screen_root(commands, theme, false);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(26.0)).with_children(|c| {
-            c.spawn(theme.heading_flat("MATCHMAKING", 22.0, theme::ORANGE));
+            let title = match kind {
+                QueueKind::Competitive => "COMPETITIVE",
+                QueueKind::Quick => "QUICK PLAY",
+            };
+            c.spawn(theme.heading_flat(title, 22.0, theme::ORANGE));
             c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), margin: UiRect::top(Val::Px(12.0)), ..default() })
                 .with_children(|r| {
                     r.spawn(theme.soldier_icon(32.0));
@@ -1223,10 +1668,16 @@ fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account) {
                 theme.label(queue_size_label(account), 13.0, theme::TAN_LIGHT),
                 Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() },
             ));
-            c.spawn((
-                theme.label(format!("playing as {} ({} ELO)", account.display_name(), account.user.as_ref().map(|u| u.elo).unwrap_or(0)), 13.0, theme::OFF_WHITE),
-                Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() },
-            ));
+            let identity = match kind {
+                QueueKind::Competitive => format!("playing as {} ({} ELO)", account.display_name(), account.user.as_ref().map(|u| u.elo).unwrap_or(0)),
+                QueueKind::Quick => format!("playing as {}", account.display_name()),
+            };
+            c.spawn((theme.label(identity, 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
+            if kind == QueueKind::Quick {
+                // An invite: whoever opens the link lands in this queue too (`?qp`, see `auto_join`).
+                c.spawn((theme.label("invite a friend: anyone who opens this link joins the quick play queue", 13.0, theme::OFF_WHITE), Node { margin: UiRect::top(Val::Px(4.0)), ..default() }));
+                crate::copylink::spawn_link_box(c, theme, cfg.quick_play_link());
+            }
             c.spawn(theme.button("Cancel", UiAction::CancelQueue, 200.0, BUTTON_H, 16.0));
             c.spawn(theme.label("Esc to cancel", 12.0, theme::TAN_DARK));
         });
@@ -1284,15 +1735,23 @@ fn queue_status(
     }
 }
 
-/// Keeps the main menu's "(N playing)" label current without rebuilding the screen.
-fn playing_count(account: Res<Account>, mut text: Query<&mut Text, With<PlayingText>>) {
+/// Keeps the main menu's counts (in the queue buttons and under the logo) current without
+/// rebuilding the screen.
+fn activity_counts(account: Res<Account>, mut counts: Query<(&CountText, &mut Text), Without<OnlineText>>, mut online: Query<&mut Text, With<OnlineText>>) {
     if !account.is_changed() {
         return;
     }
-    let Ok(mut t) = text.single_mut() else { return };
-    let want = playing_label(account.stats);
-    if t.0 != want {
-        t.0 = want;
+    for (kind, mut t) in &mut counts {
+        let want = count_label(account.stats, kind.0);
+        if t.0 != want {
+            t.0 = want;
+        }
+    }
+    if let Ok(mut t) = online.single_mut() {
+        let want = online_label(account.stats);
+        if t.0 != want {
+            t.0 = want;
+        }
     }
 }
 
@@ -1326,6 +1785,7 @@ struct MenuCtx<'w, 's> {
     form: ResMut<'w, Form>,
     cfg: Res<'w, ClientConfig>,
     time: Res<'w, Time<Real>>,
+    lb_rows: Res<'w, LeaderboardRows>,
     /// Both only read by the desktop update path.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     status: Res<'w, SignalingStatus>,
@@ -1397,10 +1857,15 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
                 ctx.cmds.write(NetCommand::JoinRoom(ctx.typed.0.clone()));
             }
         }
-        UiAction::FindGame => {
+        UiAction::QuickPlay => {
+            let now = ctx.time.elapsed_secs_f64();
+            ctx.account.join_queue(&ctx.cfg, now, QueueKind::Quick);
+            *ctx.screen = UiScreen::Queue;
+        }
+        UiAction::Competitive => {
             if ctx.account.logged_in() {
                 let now = ctx.time.elapsed_secs_f64();
-                ctx.account.join_queue(&ctx.cfg, now);
+                ctx.account.join_queue(&ctx.cfg, now, QueueKind::Competitive);
                 *ctx.screen = UiScreen::Queue;
             }
         }
@@ -1510,6 +1975,22 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
             ctx.account.notice = None;
             ctx.form.clear_secrets();
             *ctx.screen = UiScreen::ChangePassword;
+        }
+        UiAction::OpenTab(tab) => {
+            ctx.account.error = None;
+            // Fresh standings, on the page that was open last. The first time the tab has not
+            // been laid out yet, so how many fit is unknown: `leaderboard_fetch` asks then.
+            if tab == Tab::Leaderboard
+                && let Some(per) = ctx.lb_rows.0
+            {
+                let page = ctx.account.leaderboard.as_ref().map(|lb| lb.page).unwrap_or(1);
+                ctx.account.fetch_leaderboard(&ctx.cfg, page, per);
+            }
+            *ctx.screen = tab.screen();
+        }
+        UiAction::LeaderboardPage(page) => {
+            let per = ctx.lb_rows.0.unwrap_or(10);
+            ctx.account.fetch_leaderboard(&ctx.cfg, page, per);
         }
         UiAction::OpenDownload => *ctx.screen = UiScreen::Download,
         UiAction::Download(platform) => crate::webclip::open_url(&platform.url()),
@@ -1639,7 +2120,7 @@ fn back_target(screen: UiScreen, in_game: bool) -> UiScreen {
         UiScreen::Reset => UiScreen::Forgot,
         UiScreen::Register | UiScreen::Forgot => UiScreen::Login,
         UiScreen::ChangeUsername | UiScreen::ChangePassword => UiScreen::Profile,
-        UiScreen::Login | UiScreen::Profile | UiScreen::Queue | UiScreen::Download | UiScreen::Main => UiScreen::Main,
+        UiScreen::Login | UiScreen::Profile | UiScreen::Queue | UiScreen::Download | UiScreen::Leaderboard | UiScreen::Main => UiScreen::Main,
         UiScreen::Pause | UiScreen::Hidden => {
             if in_game {
                 UiScreen::Pause
@@ -1937,16 +2418,22 @@ fn apply_paste(mut paste: ResMut<PendingPaste>, mut typed: ResMut<TypedCode>, mu
     }
 }
 
-/// Joins when the app was launched with a room code (`?room=` or `--room`). Waits for the web
-/// loading screen to be gone (`StartupDone`) so the match cannot start, and the countdown run,
-/// under it while the assets and the render warm-up are still in progress.
-fn auto_join(mut cfg: ResMut<ClientConfig>, mut cmds: MessageWriter<NetCommand>) {
+/// Joins when the app was launched with a room code (`?room=` or `--room`) or a quick play invite
+/// (`?qp` or `--quick`). Waits for the web loading screen to be gone (`StartupDone`) so the match
+/// cannot start, and the countdown run, under it while the assets and the render warm-up are
+/// still in progress.
+fn auto_join(mut cfg: ResMut<ClientConfig>, mut cmds: MessageWriter<NetCommand>, mut account: ResMut<Account>, mut screen: ResMut<UiScreen>, time: Res<Time<Real>>) {
     if let Some(code) = cfg.initial_room.take()
         && code.len() == ROOM_CODE_LEN
     {
         cmds.write(NetCommand::JoinRoom(code));
         // The link has done its job; a reload must not rejoin a room that may be long gone.
-        crate::config::forget_room_in_url();
+        crate::config::forget_join_in_url();
+    } else if cfg.initial_quick {
+        cfg.initial_quick = false;
+        account.join_queue(&cfg, time.elapsed_secs_f64(), QueueKind::Quick);
+        *screen = UiScreen::Queue;
+        crate::config::forget_join_in_url();
     }
     if cfg.auto_practice {
         cfg.auto_practice = false;
@@ -1969,35 +2456,43 @@ fn setup_connecting(
     if cams.is_empty() {
         commands.spawn(menu_camera());
     }
-    let ranked = match kind.as_deref() {
-        Some(MatchKind::Ranked(info)) => Some(info.clone()),
-        _ => None,
-    };
     let root = screen_root(&mut commands, &theme, false);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(26.0)).with_children(|c| {
-            if let Some(info) = &ranked {
-                c.spawn(theme.heading_flat("RANKED MATCH", 22.0, theme::ORANGE));
-                let me = account.user.as_ref().map(|u| (u.username.clone(), u.elo)).unwrap_or((account.display_name(), 0));
+            // "me VS them", with or without ratings.
+            let versus = |c: &mut RelatedSpawnerCommands<ChildOf>, me: String, them: String| {
                 c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(18.0), margin: UiRect::vertical(Val::Px(10.0)), ..default() })
                     .with_children(|r| {
-                        r.spawn((theme.heading(format!("{} ({})", me.0, me.1), 30.0, theme::RED_TEAM), no_wrap()));
+                        r.spawn((theme.heading(me, 30.0, theme::RED_TEAM), no_wrap()));
                         r.spawn(theme.heading_flat("VS", 18.0, theme::OFF_WHITE));
-                        r.spawn((theme.heading(format!("{} ({})", info.opponent, info.opponent_elo), 30.0, theme::BLU_TEAM), no_wrap()));
+                        r.spawn((theme.heading(them, 30.0, theme::BLU_TEAM), no_wrap()));
                     });
-                c.spawn((theme.label("first to 5 airshots; leaving early forfeits the match", 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
-            } else {
-                c.spawn(theme.heading_flat("PRIVATE ROOM", 22.0, theme::ORANGE));
-                c.spawn(theme::inset(Node {
-                    padding: UiRect::axes(Val::Px(26.0), Val::Px(6.0)),
-                    margin: UiRect::vertical(Val::Px(8.0)),
-                    ..default()
-                }))
-                .with_children(|b| {
-                    b.spawn(theme.heading(code_display(&code, ROOM_CODE_LEN), 64.0, theme::YELLOW));
-                });
-                c.spawn(theme.label("share this link to invite someone:", 14.0, theme::OFF_WHITE));
-                crate::copylink::spawn_link_box(c, &theme, cfg.join_link(&code));
+            };
+            match kind.as_deref() {
+                Some(MatchKind::Ranked(info)) => {
+                    c.spawn(theme.heading_flat("RANKED MATCH", 22.0, theme::ORANGE));
+                    let me = account.user.as_ref().map(|u| (u.username.clone(), u.elo)).unwrap_or((account.display_name(), 0));
+                    versus(c, format!("{} ({})", me.0, me.1), format!("{} ({})", info.opponent, info.opponent_elo));
+                    c.spawn((theme.label("first to 5 airshots; leaving early forfeits the match", 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
+                }
+                Some(MatchKind::Quick(info)) => {
+                    c.spawn(theme.heading_flat("QUICK PLAY", 22.0, theme::ORANGE));
+                    versus(c, account.display_name(), info.opponent.clone());
+                    c.spawn((theme.label("unranked: rounds go on until someone leaves", 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
+                }
+                _ => {
+                    c.spawn(theme.heading_flat("PRIVATE ROOM", 22.0, theme::ORANGE));
+                    c.spawn(theme::inset(Node {
+                        padding: UiRect::axes(Val::Px(26.0), Val::Px(6.0)),
+                        margin: UiRect::vertical(Val::Px(8.0)),
+                        ..default()
+                    }))
+                    .with_children(|b| {
+                        b.spawn(theme.heading(code_display(&code, ROOM_CODE_LEN), 64.0, theme::YELLOW));
+                    });
+                    c.spawn(theme.label("share this link to invite someone:", 14.0, theme::OFF_WHITE));
+                    crate::copylink::spawn_link_box(c, &theme, cfg.join_link(&code));
+                }
             }
             c.spawn((theme.label(format!("matchmaking via {}", cfg.signaling_url), 11.0, theme::TAN_DARK), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
             c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), ..default() })

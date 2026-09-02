@@ -3,7 +3,7 @@
 
 use crate::api::{ApiError, AppState};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -102,5 +102,19 @@ impl FromRequestParts<AppState> for AuthUser {
             return Err(ApiError::Unauthorized("session expired, log in again".into()));
         }
         Ok(AuthUser { id: claims.sub, username: row.try_get("username")? })
+    }
+}
+
+/// `Option<AuthUser>`: routes open to anonymous players too (quick play). No `Authorization`
+/// header is nobody; a header that does not check out is still an error, so a stale token is
+/// reported rather than silently played as anonymous.
+impl OptionalFromRequestParts<AppState> for AuthUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Option<Self>, Self::Rejection> {
+        if !parts.headers.contains_key(axum::http::header::AUTHORIZATION) {
+            return Ok(None);
+        }
+        <AuthUser as FromRequestParts<AppState>>::from_request_parts(parts, state).await.map(Some)
     }
 }

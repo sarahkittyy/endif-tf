@@ -2,6 +2,7 @@
 //! fonts and the widget builders shared by the menus and the HUD.
 
 use bevy::prelude::*;
+use bevy::ui::UiSystems;
 use bevy::ui::widget::NodeImageMode;
 use bevy::window::PrimaryWindow;
 
@@ -38,6 +39,13 @@ pub struct Theme {
     pub soldier: Handle<Image>,
     /// Title screen background.
     pub menu_bg: Handle<Image>,
+    /// The bookmark tab on the title panel's edge, for the page being shown (it opens into the
+    /// panel) and for the others (`tools/tf2/ui_assets.py`).
+    pub tab_on: Handle<Image>,
+    pub tab_off: Handle<Image>,
+    /// The TF2 logo glyph (the menu tab) and the winged UGC trophy (the leaderboard tab).
+    pub tf2_logo: Handle<Image>,
+    pub trophy: Handle<Image>,
 }
 
 impl FromWorld for Theme {
@@ -48,6 +56,10 @@ impl FromWorld for Theme {
             secondary: assets.load("fonts/TF2Secondary.ttf"),
             soldier: assets.load("ui/soldier.png"),
             menu_bg: assets.load("ui/menu_bg.png"),
+            tab_on: assets.load("ui/tab_on.png"),
+            tab_off: assets.load("ui/tab_off.png"),
+            tf2_logo: assets.load("ui/tf2_logo.png"),
+            trophy: assets.load("ui/trophy.png"),
         }
     }
 }
@@ -56,7 +68,10 @@ pub struct ThemePlugin;
 
 impl Plugin for ThemePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Theme>().add_systems(Update, fit_menu_backdrop);
+        // Right before layout, so a backdrop spawned this frame (a screen rebuilt by `menu.rs`) is
+        // sized before it is first drawn; in `Update` it could run ahead of the rebuild, and the
+        // unsized image would leave the window dark for a frame whenever the tabs switch.
+        app.init_resource::<Theme>().add_systems(PostUpdate, fit_menu_backdrop.before(UiSystems::Layout));
     }
 }
 
@@ -115,6 +130,14 @@ impl Theme {
             Node { width: Val::Px(size), height: Val::Px(size), flex_shrink: 0.0, ..default() },
         )
     }
+
+    /// Any square icon at a given size, tinted (white leaves it as is).
+    pub fn icon(image: Handle<Image>, size: f32, tint: Color) -> impl Bundle {
+        (
+            ImageNode { image, color: tint, ..default() },
+            Node { width: Val::Px(size), height: Val::Px(size), flex_shrink: 0.0, ..default() },
+        )
+    }
 }
 
 /// A `TFFatLineBorder` panel: dark brown, rounded, thin tan border, soft shadow.
@@ -164,7 +187,7 @@ impl Theme {
 
 /// Keeps every `MenuBackdrop` at its native aspect ratio while covering its parent: the image is
 /// scaled by the larger of the two axis ratios and centred, so the excess along the other axis is
-/// cropped by the parent's clip. Runs every frame so window resizes are picked up.
+/// cropped by the parent's clip. Runs every frame (before layout) so window resizes are picked up.
 fn fit_menu_backdrop(
     mut backdrops: Query<(&ChildOf, &mut Node), With<MenuBackdrop>>,
     parents: Query<&ComputedNode>,

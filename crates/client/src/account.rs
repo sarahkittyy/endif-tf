@@ -1,6 +1,6 @@
 //! Who the player is: the anonymous name used while logged out, the logged-in account (login
-//! token + profile), the calls to the server's `/api`, the matchmaking queue and the reporting of
-//! ranked results.
+//! token + profile), the calls to the server's `/api`, the matchmaking queues (competitive for
+//! accounts, quick play for anyone) and the reporting of results.
 //!
 //! The token and the anonymous name are saved next to the settings (`account.json`, or
 //! `localStorage` on the web) so nobody has to log in on every start. Requests run through
@@ -24,7 +24,7 @@ pub const NAME_MAX: usize = 20;
 const STORE: &str = "account.json";
 /// How often the queue is polled.
 const QUEUE_POLL_SECS: f64 = 1.5;
-/// How often the main menu asks how many players are playing and searching.
+/// How often the main menu asks how many players are online, playing and searching.
 const STATS_POLL_SECS: f64 = 5.0;
 /// How long the result banner stays up before a finished ranked match returns to the menu.
 const RANKED_EXIT_SECS: f64 = 4.0;
@@ -77,11 +77,49 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Profile {
     pub user: UserInfo,
+    /// Place on the leaderboard; none until a ranked game has been played.
+    #[serde(default)]
+    pub rank: Option<u32>,
     #[serde(default)]
     pub matches: Vec<HistoryEntry>,
 }
 
-/// A ranked pairing from the queue.
+/// One page of the leaderboard (`GET /api/leaderboard?page=N`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct Leaderboard {
+    pub players: Vec<LeaderboardEntry>,
+    /// This page, from 1, and how many there are (at least 1). Defaults cover a server from
+    /// before the leaderboard had pages.
+    #[serde(default = "one")]
+    pub page: u32,
+    #[serde(default = "one")]
+    pub pages: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+/// One line of the leaderboard.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LeaderboardEntry {
+    /// 1 for the top player.
+    pub rank: u32,
+    pub username: String,
+    pub elo: i32,
+    pub wins: i32,
+    pub losses: i32,
+}
+
+impl LeaderboardEntry {
+    /// Wins over games played, as a percentage. Everyone on the board has played at least one.
+    pub fn win_rate(&self) -> f32 {
+        let games = self.wins + self.losses;
+        if games > 0 { 100.0 * self.wins as f32 / games as f32 } else { 0.0 }
+    }
+}
+
+/// A ranked pairing from the competitive queue.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MatchInfo {
     pub match_id: u64,
@@ -90,6 +128,32 @@ pub struct MatchInfo {
     pub slot: u8,
     pub opponent: String,
     pub opponent_elo: i32,
+}
+
+/// A pairing from the quick play queue: a room to meet in, nothing on record.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct QuickMatch {
+    pub room: String,
+    pub opponent: String,
+}
+
+/// Which queue a player is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueKind {
+    /// Accounts only; the result is rated.
+    Competitive,
+    /// Anyone; unrated, rounds go on until someone leaves.
+    Quick,
+}
+
+impl QueueKind {
+    /// The API prefix of this queue's join / poll / leave routes.
+    fn path(self) -> &'static str {
+        match self {
+            QueueKind::Competitive => "/queue",
+            QueueKind::Quick => "/quick",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -113,10 +177,12 @@ pub enum Req {
     ChangeUsername,
     ChangePassword,
     Profile,
+    /// The top players, for the leaderboard tab.
+    Leaderboard,
     QueueJoin,
     QueuePoll,
     QueueLeave,
-    /// How many players are playing and searching, for the main menu.
+    /// How many players are online, playing and searching, for the main menu.
     Stats,
     Report,
     /// A private-room round for the history.
@@ -128,7 +194,7 @@ pub enum Req {
 impl Req {
     /// Requests the forms wait on (buttons show "working...").
     fn blocks(self) -> bool {
-        !matches!(self, Req::Me | Req::QueuePoll | Req::QueueLeave | Req::Stats | Req::Report | Req::Casual | Req::MatchStatus)
+        !matches!(self, Req::Me | Req::QueuePoll | Req::QueueLeave | Req::Stats | Req::Report | Req::Casual | Req::MatchStatus | Req::Leaderboard)
     }
 }
 
@@ -140,23 +206,40 @@ struct Pending {
 }
 
 pub struct QueueState {
+    pub kind: QueueKind,
     pub ticket: Option<String>,
     pub next_poll: f64,
     pub position: usize,
     /// Players in the queue, us included (0 until the server has answered).
     pub waiting: usize,
-    /// Players in a game, as of the last poll.
+    /// Players in a game of this kind, as of the last poll.
     pub playing: usize,
     pub since: f64,
 }
 
-/// Server-wide activity, for the main menu.
+/// Activity in one matchmaking mode.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-pub struct Stats {
+pub struct Activity {
     /// Players in a game right now.
     pub playing: usize,
     /// Players searching for a match.
     pub waiting: usize,
+}
+
+impl Activity {
+    /// Everyone busy with this mode: in a game or waiting for one.
+    pub fn total(self) -> usize {
+        self.playing + self.waiting
+    }
+}
+
+/// Server-wide activity, for the main menu. Private rooms count towards `online` only.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct Stats {
+    pub competitive: Activity,
+    pub quick: Activity,
+    /// Clients connected to the server right now, whatever they are doing.
+    pub online: usize,
 }
 
 /// How a ranked match ended, from this player's side.
@@ -200,6 +283,8 @@ pub struct Account {
     pub anon_name: String,
     /// Last fetched profile (own or not), for the profile screen.
     pub profile: Option<Profile>,
+    /// The page of the leaderboard on show; `None` until the first one arrives (or after a failure).
+    pub leaderboard: Option<Leaderboard>,
     /// Address the register / forgot flows are waiting on a code for.
     pub pending_email: String,
     /// Menu time (`Time<Real>`) from which "resend code" may be pressed again.
@@ -207,8 +292,8 @@ pub struct Account {
     pub error: Option<String>,
     pub notice: Option<String>,
     pub queue: Option<QueueState>,
-    /// Who is playing and searching right now, as last reported; `None` until the server has
-    /// answered (or after it stopped answering).
+    /// Who is online, playing and searching right now, as last reported; `None` until the server
+    /// has answered (or after it stopped answering).
     pub stats: Option<Stats>,
     /// Menu time of the next `/stats` request.
     next_stats_poll: f64,
@@ -238,6 +323,7 @@ impl Account {
             user: None,
             anon_name,
             profile: None,
+            leaderboard: None,
             pending_email: String::new(),
             resend_at: 0.0,
             error: None,
@@ -364,6 +450,20 @@ impl Account {
         self.call(cfg, Req::Profile, &format!("/profile/{username}"), None);
     }
 
+    /// Asks for a page of the leaderboard (from 1), `per` players to a page (as many as the tab
+    /// has room for). The page on show stays up until the new one arrives; the tab shows
+    /// "loading..." only while it has nothing yet.
+    pub fn fetch_leaderboard(&mut self, cfg: &ClientConfig, page: u32, per: u32) {
+        if !self.loading_leaderboard() {
+            self.call(cfg, Req::Leaderboard, &format!("/leaderboard?page={page}&per={per}"), None);
+        }
+    }
+
+    /// A leaderboard page is on its way.
+    pub fn loading_leaderboard(&self) -> bool {
+        self.in_flight(Req::Leaderboard)
+    }
+
     pub fn logout(&mut self) {
         self.token = None;
         self.user = None;
@@ -371,24 +471,34 @@ impl Account {
         self.save();
     }
 
-    pub fn join_queue(&mut self, cfg: &ClientConfig, now: f64) {
-        self.queue = Some(QueueState { ticket: None, next_poll: now, position: 0, waiting: 0, playing: 0, since: now });
-        self.call(cfg, Req::QueueJoin, "/queue/join", Some(json!({})));
+    pub fn join_queue(&mut self, cfg: &ClientConfig, now: f64, kind: QueueKind) {
+        self.queue = Some(QueueState { kind, ticket: None, next_poll: now, position: 0, waiting: 0, playing: 0, since: now });
+        self.send_join(cfg, kind);
+    }
+
+    /// The join request itself (also used to queue up again after a ticket expired). Quick play
+    /// sends the display name, since the server has no account to take it from.
+    fn send_join(&mut self, cfg: &ClientConfig, kind: QueueKind) {
+        let body = match kind {
+            QueueKind::Competitive => json!({}),
+            QueueKind::Quick => json!({ "name": self.display_name() }),
+        };
+        self.call(cfg, Req::QueueJoin, &format!("{}/join", kind.path()), Some(body));
     }
 
     pub fn leave_queue(&mut self, cfg: &ClientConfig) {
         if let Some(q) = self.queue.take()
             && let Some(ticket) = q.ticket
         {
-            self.call(cfg, Req::QueueLeave, "/queue/leave", Some(json!({ "ticket": ticket })));
+            self.call(cfg, Req::QueueLeave, &format!("{}/leave", q.kind.path()), Some(json!({ "ticket": ticket })));
         }
     }
 
-    fn poll_queue(&mut self, cfg: &ClientConfig, ticket: &str) {
-        self.call(cfg, Req::QueuePoll, "/queue/poll", Some(json!({ "ticket": ticket })));
+    fn poll_queue(&mut self, cfg: &ClientConfig, kind: QueueKind, ticket: &str) {
+        self.call(cfg, Req::QueuePoll, &format!("{}/poll", kind.path()), Some(json!({ "ticket": ticket })));
     }
 
-    /// Asks how many players are playing and searching (the main menu's "(N playing)").
+    /// Asks how many players are online, playing and searching (the main menu's counts).
     fn fetch_stats(&mut self, cfg: &ClientConfig) {
         if !self.in_flight(Req::Stats) {
             self.call(cfg, Req::Stats, "/stats", None);
@@ -575,6 +685,10 @@ fn poll_requests(
                 Ok(p) => account.profile = Some(p),
                 Err(e) => account.error = Some(format!("bad profile data: {e}")),
             },
+            (Req::Leaderboard, Ok(v)) => match serde_json::from_value::<Leaderboard>(v) {
+                Ok(p) => account.leaderboard = Some(p),
+                Err(e) => account.error = Some(format!("bad leaderboard data: {e}")),
+            },
             (Req::QueueJoin, Ok(v)) => {
                 if let Some(q) = account.queue.as_mut() {
                     q.ticket = v["ticket"].as_str().map(str::to_string);
@@ -587,18 +701,29 @@ fn poll_requests(
                 *screen = UiScreen::Main;
             }
             (Req::QueuePoll, Ok(v)) => match v["status"].as_str().unwrap_or_default() {
-                "matched" => match serde_json::from_value::<MatchInfo>(v["match"].clone()) {
-                    Ok(info) => {
-                        info!("matched against {} ({} elo), room {}", info.opponent, info.opponent_elo, info.room);
-                        account.queue = None;
-                        cmds.write(NetCommand::StartRanked(info));
+                "matched" => {
+                    let kind = account.queue.as_ref().map(|q| q.kind).unwrap_or(QueueKind::Competitive);
+                    let start = match kind {
+                        QueueKind::Competitive => serde_json::from_value::<MatchInfo>(v["match"].clone()).map(|info| {
+                            info!("matched against {} ({} elo), room {}", info.opponent, info.opponent_elo, info.room);
+                            NetCommand::StartRanked(info)
+                        }),
+                        QueueKind::Quick => serde_json::from_value::<QuickMatch>(v["match"].clone()).map(|info| {
+                            info!("quick play: matched against {}, room {}", info.opponent, info.room);
+                            NetCommand::StartQuick(info)
+                        }),
+                    };
+                    account.queue = None;
+                    match start {
+                        Ok(cmd) => {
+                            cmds.write(cmd);
+                        }
+                        Err(e) => {
+                            account.error = Some(format!("bad match data: {e}"));
+                            *screen = UiScreen::Main;
+                        }
                     }
-                    Err(e) => {
-                        account.queue = None;
-                        account.error = Some(format!("bad match data: {e}"));
-                        *screen = UiScreen::Main;
-                    }
-                },
+                }
                 "waiting" => {
                     if let Some(q) = account.queue.as_mut() {
                         q.position = v["position"].as_u64().unwrap_or(0) as usize;
@@ -608,11 +733,14 @@ fn poll_requests(
                 }
                 _ => {
                     // Expired (the server restarted, or we stopped polling): join again.
-                    if let Some(q) = account.queue.as_mut() {
+                    let kind = account.queue.as_mut().map(|q| {
                         q.ticket = None;
-                    }
-                    if *screen == UiScreen::Queue {
-                        account.call(&cfg, Req::QueueJoin, "/queue/join", Some(json!({})));
+                        q.kind
+                    });
+                    if let Some(kind) = kind
+                        && *screen == UiScreen::Queue
+                    {
+                        account.send_join(&cfg, kind);
                     }
                 }
             },
@@ -669,15 +797,16 @@ fn queue_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, cfg: Res<Clie
         return;
     }
     q.next_poll = now + QUEUE_POLL_SECS;
+    let kind = q.kind;
     let Some(ticket) = q.ticket.clone() else { return };
     if !account.in_flight(Req::QueuePoll) && !account.in_flight(Req::QueueJoin) {
-        account.poll_queue(&cfg, &ticket);
+        account.poll_queue(&cfg, kind, &ticket);
     }
 }
 
-/// Keeps the main menu's activity count current while it is up and the server answers.
+/// Keeps the title screen's activity count current while it is up and the server answers.
 fn stats_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, status: Res<SignalingStatus>, cfg: Res<ClientConfig>, time: Res<Time<Real>>) {
-    if *screen != UiScreen::Main || status.state != SignalState::Up {
+    if !matches!(*screen, UiScreen::Main | UiScreen::Leaderboard) || status.state != SignalState::Up {
         return;
     }
     let now = time.elapsed_secs_f64();
@@ -743,11 +872,11 @@ fn ranked_round_end(
     }
 }
 
-/// A round in a private room reached the frag limit: put it in the history. The room goes on
-/// (the sim resets the scores for the next round), so this fires once per round, and a round
-/// abandoned part-way is not recorded. The opponent is known by display name only.
+/// A round in a private room or a quick play game reached the frag limit: put it in the history.
+/// The game goes on (the sim resets the scores for the next round), so this fires once per round,
+/// and a round abandoned part-way is not recorded. The opponent is known by display name only.
 fn casual_round_end(fx: Res<PendingFx>, kind: Option<Res<MatchKind>>, local: Res<LocalHandle>, names: Res<PlayerNames>, cfg: Res<ClientConfig>, mut account: ResMut<Account>) {
-    let Some(MatchKind::Room { code }) = kind.as_deref() else { return };
+    let (Some(MatchKind::Room { code }) | Some(MatchKind::Quick(QuickMatch { room: code, .. }))) = kind.as_deref() else { return };
     for ev in &fx.events {
         if let SimEvent::RoundWon { winner, score } = ev {
             let me = local.0;

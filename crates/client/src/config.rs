@@ -84,6 +84,9 @@ pub struct ClientConfig {
     pub ice: String,
     /// Room code supplied on the command line / URL (`?room=CODE`), if any.
     pub initial_room: Option<String>,
+    /// `?qp` / `--quick`: join the quick play queue as soon as the menu is up (the invite link
+    /// from the quick play screen).
+    pub initial_quick: bool,
     /// `--name` / `?name=`: anonymous display name for this run (not saved).
     pub player_name: Option<String>,
     /// Dev: start an offline practice match immediately.
@@ -110,6 +113,7 @@ impl ClientConfig {
             api_override: built_in(BUILT_IN_API).map(str::to_string),
             ice: built_in(BUILT_IN_ICE).unwrap_or(DEFAULT_ICE).to_string(),
             initial_room: None,
+            initial_quick: false,
             player_name: None,
             auto_practice: false,
             screenshot: None,
@@ -132,6 +136,7 @@ impl ClientConfig {
             while let Some(a) = args.next() {
                 match a.as_str() {
                     "--room" => cfg.initial_room = args.next().map(normalize_room_code),
+                    "--quick" => cfg.initial_quick = true,
                     "--server" => {
                         if let Some(u) = args.next() {
                             cfg.signaling_url = u;
@@ -158,6 +163,7 @@ impl ClientConfig {
                 for (k, v) in parse_query(&search) {
                     match k.as_str() {
                         "room" => cfg.initial_room = Some(normalize_room_code(v)),
+                        "qp" => cfg.initial_quick = true,
                         "server" => cfg.signaling_url = v,
                         "api" => cfg.api_override = Some(v),
                         "ice" => cfg.ice = v,
@@ -205,6 +211,12 @@ impl ClientConfig {
         format!("{}/endif-{}?v={}", self.signaling_url.trim_end_matches('/'), code, endif_sim::protocol_id())
     }
 
+    /// The presence socket (`/presence` on the signaling server): open for as long as the app
+    /// runs, so the server can count who is online.
+    pub fn presence_url(&self) -> String {
+        format!("{}/presence?v={}", self.signaling_url.trim_end_matches('/'), endif_sim::protocol_id())
+    }
+
     /// `http(s)://host:port` of the account API: `ENDIF_API`, or the signaling server over HTTP.
     pub fn api_url(&self) -> String {
         match &self.api_override {
@@ -231,34 +243,52 @@ impl ClientConfig {
     pub fn join_link(&self, code: &str) -> String {
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(loc) = web_sys::window().map(|w| w.location()) {
-                let origin = loc.origin().unwrap_or_default();
-                let path = loc.pathname().unwrap_or_default();
-                let server = if self.signaling_url == default_signaling() {
-                    String::new()
-                } else {
-                    format!("&server={}", self.signaling_url)
-                };
-                return format!("{origin}{path}?room={code}{server}");
+            if let Some(link) = self.page_link(&format!("room={code}")) {
+                return link;
             }
         }
         code.to_string()
     }
+
+    /// A link that puts whoever opens it straight into the quick play queue (`?qp`). The web
+    /// build points at its own page; the desktop build at the site the server runs on (the site
+    /// and the server share an origin on endif.tf).
+    pub fn quick_play_link(&self) -> String {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(link) = self.page_link("qp") {
+                return link;
+            }
+        }
+        format!("{}/?qp", http_base(&self.signaling_url))
+    }
+
+    /// Web: the page's own address with `query` and, when the server is not the page's default
+    /// one, `server=`, so the link opens against the same server.
+    #[cfg(target_arch = "wasm32")]
+    fn page_link(&self, query: &str) -> Option<String> {
+        let loc = web_sys::window()?.location();
+        let origin = loc.origin().unwrap_or_default();
+        let path = loc.pathname().unwrap_or_default();
+        let server = if self.signaling_url == default_signaling() { String::new() } else { format!("&server={}", self.signaling_url) };
+        Some(format!("{origin}{path}?{query}{server}"))
+    }
 }
 
-/// Web: drops `room=` from the address bar once the room has been joined, so a reload (or the
-/// address copied again later) does not silently rejoin a room whose host has long left. Every
-/// other parameter (`server=`, `name=`...) stays. No-op on desktop.
-pub fn forget_room_in_url() {
+/// Web: drops `room=` and `qp` from the address bar once they have been acted on, so a reload
+/// (or the address copied again later) does not silently rejoin a room whose host has long left,
+/// or queue up again. Every other parameter (`server=`, `name=`...) stays. No-op on desktop.
+pub fn forget_join_in_url() {
     #[cfg(target_arch = "wasm32")]
     {
         let Some(window) = web_sys::window() else { return };
         let loc = window.location();
         let (Ok(search), Ok(path)) = (loc.search(), loc.pathname()) else { return };
-        if !search.contains("room=") {
+        let all: Vec<&str> = search.trim_start_matches('?').split('&').filter(|kv| !kv.is_empty()).collect();
+        let rest: Vec<&str> = all.iter().copied().filter(|kv| !matches!(kv.split('=').next().unwrap_or_default(), "room" | "qp")).collect();
+        if rest.len() == all.len() {
             return;
         }
-        let rest: Vec<&str> = search.trim_start_matches('?').split('&').filter(|kv| !kv.is_empty() && !kv.starts_with("room=")).collect();
         let url = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
         if let Ok(history) = window.history() {
             let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
@@ -314,6 +344,14 @@ mod tests {
         assert_eq!(cfg.version_url(), "https://signal.example.org/version");
         cfg.api_override = Some("https://api.example.org/".to_string());
         assert_eq!(cfg.api_url(), "https://api.example.org");
+    }
+
+    #[test]
+    fn desktop_quick_play_link_points_at_the_site() {
+        let mut cfg = ClientConfig::load();
+        cfg.signaling_url = "wss://endif.tf".to_string();
+        assert_eq!(cfg.quick_play_link(), "https://endif.tf/?qp");
+        assert_eq!(cfg.presence_url(), format!("wss://endif.tf/presence?v={}", endif_sim::protocol_id()));
     }
 
     #[test]

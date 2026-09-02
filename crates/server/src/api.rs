@@ -4,11 +4,13 @@
 //! carry `Authorization: Bearer <token>` (the token from `/api/login` etc.).
 
 use crate::auth::{self, AuthUser, Jwt};
+use crate::leaderboard;
 use crate::limits::{self, Group, Limiter};
 use crate::mail::Mailer;
 use crate::matches::{self, Report};
 use crate::queue::{Matched, PollResult, Queue};
-use axum::extract::{Path, State};
+use crate::rooms::RoomKind;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
@@ -29,7 +31,10 @@ pub struct Inner {
     pub db: MySqlPool,
     pub jwt: Jwt,
     pub mailer: Mailer,
+    /// The competitive queue (accounts only, rated).
     pub queue: Mutex<Queue>,
+    /// The quick play queue (anyone, unrated).
+    pub quick: Mutex<Queue>,
     pub limits: Limiter,
     /// Signaling room occupancy (`rooms.rs`), for `GET /api/room/{code}`.
     pub rooms: crate::rooms::SharedRooms,
@@ -92,10 +97,14 @@ pub fn router(state: AppState) -> Router {
     let rest = Router::new()
         .route("/me", get(me))
         .route("/profile/{username}", get(profile))
+        .route("/leaderboard", get(leaderboard))
         .route("/stats", get(stats))
         .route("/queue/join", post(queue_join))
         .route("/queue/poll", post(queue_poll))
         .route("/queue/leave", post(queue_leave))
+        .route("/quick/join", post(quick_join))
+        .route("/quick/poll", post(quick_poll))
+        .route("/quick/leave", post(quick_leave))
         .route("/match/{id}", get(match_status))
         .route("/match/{id}/report", post(match_report))
         .route("/match/casual", post(match_casual))
@@ -517,7 +526,8 @@ async fn change_password(State(state): State<AppState>, user: AuthUser, Json(req
     session_response(&state, user.id).await
 }
 
-/// Public profile: rating, record and the last matches.
+/// Public profile: rating, place on the leaderboard (once a ranked game has been played), record
+/// and the last matches.
 async fn profile(State(state): State<AppState>, Path(username): Path<String>) -> ApiResult {
     let row = sqlx::query("SELECT id FROM accounts WHERE username = ? AND verified_at IS NOT NULL")
         .bind(username.trim())
@@ -526,31 +536,74 @@ async fn profile(State(state): State<AppState>, Path(username): Path<String>) ->
         .ok_or_else(|| ApiError::NotFound("no such player".into()))?;
     let id: u64 = row.try_get("id")?;
     let user = load_user(&state.db, id, false).await?;
+    let rank = leaderboard::rank(&state.db, id).await?;
     let matches = matches::history(&state.db, id, 50).await?;
-    Ok(Json(json!({ "user": user, "matches": matches })))
+    Ok(Json(json!({ "user": user, "rank": rank, "matches": matches })))
+}
+
+/// Players to a leaderboard page when the client does not say, and the most it may ask for.
+const LEADERBOARD_PAGE: u32 = 10;
+const LEADERBOARD_PAGE_MAX: u32 = 50;
+
+#[derive(Deserialize, Default)]
+struct PageReq {
+    /// From 1; missing or out of range is clamped.
+    #[serde(default)]
+    page: u32,
+    /// Players to a page: the client asks for as many as fit on its screen.
+    #[serde(default)]
+    per: u32,
+}
+
+/// The players by rating, `?page=N&per=K`, no login needed:
+/// `{"players": [{rank, username, elo, wins, losses}], "page", "pages", "total"}`.
+async fn leaderboard(State(state): State<AppState>, Query(req): Query<PageReq>) -> ApiResult {
+    let per = if req.per == 0 { LEADERBOARD_PAGE } else { req.per.min(LEADERBOARD_PAGE_MAX) };
+    let page = leaderboard::page(&state.db, req.page, per).await?;
+    Ok(Json(serde_json::to_value(page).unwrap_or(Value::Null)))
 }
 
 // ------------------------------------------------------------------------------------ matchmaking
 
-/// How many players are in a game and how many are searching, for the main menu. No login needed.
+/// Activity for the main menu, no login needed: per mode, how many players are in a game and how
+/// many are searching (private rooms count for neither), plus how many clients are connected at
+/// all (`rooms.rs`: one presence socket per running client, so a player in a match is one, not two).
 async fn stats(State(state): State<AppState>) -> ApiResult {
-    let playing = state.rooms.lock().unwrap().playing();
+    let (playing, online) = {
+        let rooms = state.rooms.lock().unwrap();
+        (rooms.playing(), rooms.online())
+    };
     let waiting = state.queue.lock().unwrap().len();
-    Ok(Json(json!({ "playing": playing, "waiting": waiting })))
+    let quick_waiting = state.quick.lock().unwrap().len();
+    Ok(Json(json!({
+        "competitive": { "playing": playing.ranked, "waiting": waiting },
+        "quick": { "playing": playing.quick, "waiting": quick_waiting },
+        "online": online,
+    })))
 }
 
-/// Enters the queue (or pairs with whoever is waiting). Poll `/queue/poll` with the ticket.
+/// Enters the competitive queue (or pairs with whoever is waiting). Poll `/queue/poll` with the
+/// ticket.
 async fn queue_join(State(state): State<AppState>, user: AuthUser) -> ApiResult {
     let me = load_user(&state.db, user.id, false).await?;
-    let (ticket, opponent) = state.queue.lock().unwrap().join(me.id, &me.username, me.elo);
+    let (ticket, opponent) = state.queue.lock().unwrap().join(Some(me.id), &me.username, me.elo);
     if let Some(opp) = opponent {
         let room = crate::queue::random_room_code();
-        match matches::create(&state.db, &room, (opp.account_id, &opp.username, opp.elo), (me.id, &me.username, me.elo)).await {
+        match matches::create(&state.db, &room, (opp.account.unwrap_or_default(), &opp.username, opp.elo), (me.id, &me.username, me.elo)).await {
             Ok(match_id) => {
                 info!(match_id, %room, a = %opp.username, b = %me.username, "matched");
+                state.rooms.lock().unwrap().tag(&format!("endif-{room}"), RoomKind::Ranked);
                 let now = Instant::now();
-                let for_opp = Matched { match_id, room: room.clone(), slot: 0, opponent: me.username.clone(), opponent_elo: me.elo, account_id: opp.account_id, created: now };
-                let for_me = Matched { match_id, room, slot: 1, opponent: opp.username.clone(), opponent_elo: opp.elo, account_id: me.id, created: now };
+                let for_opp = Matched {
+                    match_id: Some(match_id),
+                    room: room.clone(),
+                    slot: 0,
+                    opponent: me.username.clone(),
+                    opponent_elo: Some(me.elo),
+                    account: opp.account,
+                    created: now,
+                };
+                let for_me = Matched { match_id: Some(match_id), room, slot: 1, opponent: opp.username.clone(), opponent_elo: Some(opp.elo), account: Some(me.id), created: now };
                 state.queue.lock().unwrap().pair(&opp.ticket, for_opp, &ticket, for_me);
             }
             Err(e) => {
@@ -575,16 +628,73 @@ async fn queue_poll(State(state): State<AppState>, _user: AuthUser, Json(req): J
         let result = queue.poll(&req.ticket);
         (result, queue.len())
     };
-    let playing = state.rooms.lock().unwrap().playing();
-    Ok(Json(match result {
+    let playing = state.rooms.lock().unwrap().playing().ranked;
+    Ok(Json(poll_response(result, waiting, playing)))
+}
+
+fn poll_response(result: PollResult, waiting: usize, playing: usize) -> Value {
+    match result {
         PollResult::Waiting { position } => json!({ "status": "waiting", "position": position, "waiting": waiting, "playing": playing }),
         PollResult::Matched(m) => json!({ "status": "matched", "match": m }),
         PollResult::Expired => json!({ "status": "expired" }),
-    }))
+    }
 }
 
 async fn queue_leave(State(state): State<AppState>, _user: AuthUser, Json(req): Json<TicketReq>) -> ApiResult {
     state.queue.lock().unwrap().leave(&req.ticket);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize, Default)]
+struct QuickJoinReq {
+    /// The display name of an anonymous player (ignored when logged in: the account name is used).
+    #[serde(default)]
+    name: String,
+}
+
+/// Longest display name the client allows (`account.rs`).
+const NAME_MAX: usize = 20;
+
+/// A display name as the other player will see it: trimmed, no control characters, capped.
+fn clean_name(name: &str) -> String {
+    let name: String = name.trim().chars().filter(|c| !c.is_control()).take(NAME_MAX).collect::<String>().trim().to_string();
+    if name.is_empty() { "Soldier".to_string() } else { name }
+}
+
+/// Enters the quick play queue: anyone, logged in or not. Pairing just hands out a room; nothing
+/// is recorded (a finished round goes into a logged-in player's history through `/match/casual`,
+/// like a private room's). Poll `/quick/poll` with the ticket.
+async fn quick_join(State(state): State<AppState>, user: Option<AuthUser>, Json(req): Json<QuickJoinReq>) -> ApiResult {
+    let (account, name) = match &user {
+        Some(u) => (Some(u.id), u.username.clone()),
+        None => (None, clean_name(&req.name)),
+    };
+    let (ticket, opponent) = state.quick.lock().unwrap().join(account, &name, 0);
+    if let Some(opp) = opponent {
+        let room = crate::queue::random_room_code();
+        info!(%room, a = %opp.username, b = %name, "quick play matched");
+        state.rooms.lock().unwrap().tag(&format!("endif-{room}"), RoomKind::Quick);
+        let now = Instant::now();
+        let for_opp = Matched { match_id: None, room: room.clone(), slot: 0, opponent: name.clone(), opponent_elo: None, account: opp.account, created: now };
+        let for_me = Matched { match_id: None, room, slot: 1, opponent: opp.username.clone(), opponent_elo: None, account, created: now };
+        state.quick.lock().unwrap().pair(&opp.ticket, for_opp, &ticket, for_me);
+    }
+    let waiting = state.quick.lock().unwrap().len();
+    Ok(Json(json!({ "ticket": ticket, "waiting": waiting })))
+}
+
+async fn quick_poll(State(state): State<AppState>, Json(req): Json<TicketReq>) -> ApiResult {
+    let (result, waiting) = {
+        let mut queue = state.quick.lock().unwrap();
+        let result = queue.poll(&req.ticket);
+        (result, queue.len())
+    };
+    let playing = state.rooms.lock().unwrap().playing().quick;
+    Ok(Json(poll_response(result, waiting, playing)))
+}
+
+async fn quick_leave(State(state): State<AppState>, Json(req): Json<TicketReq>) -> ApiResult {
+    state.quick.lock().unwrap().leave(&req.ticket);
     Ok(Json(json!({ "ok": true })))
 }
 

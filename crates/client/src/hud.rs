@@ -344,10 +344,10 @@ fn update_hud(
         let focus = if captured.0 { "Tab to unfocus" } else { "click to focus" };
         let net = match kind.as_deref() {
             // Only warnings are shown ("connection interrupted", "desync ..."), never "connected".
-            Some(MatchKind::Room { .. }) if status.text != "connected" && !status.text.is_empty() => {
+            Some(MatchKind::Room { .. } | MatchKind::Quick(_)) if status.text != "connected" && !status.text.is_empty() => {
                 format!("\nping {} ms - {}", status.ping_ms, status.text)
             }
-            Some(MatchKind::Room { .. }) => format!("\nping {} ms", status.ping_ms),
+            Some(MatchKind::Room { .. } | MatchKind::Quick(_)) => format!("\nping {} ms", status.ping_ms),
             _ => String::new(),
         };
         t.0 = format!("{focus} - Esc for menu{net}");

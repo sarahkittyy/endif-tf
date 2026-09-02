@@ -2,8 +2,9 @@
 //!
 //! One process serves the WebRTC signaling websocket (matchbox full-mesh topology with room limits
 //! and an idle timeout, `rooms.rs`: clients connect to `ws://host:port/endif-<room-code>` and are
-//! introduced to the other peer in that room; all game traffic then flows peer-to-peer), the `/api`
-//! account + matchmaking HTTP API (`api.rs`) and the `/health` and `/version` probes.
+//! introduced to the other peer in that room; all game traffic then flows peer-to-peer; a socket
+//! to `/presence` joins nothing and only counts the client as online), the `/api` account +
+//! matchmaking HTTP API (`api.rs`) and the `/health` and `/version` probes.
 //! Configuration comes from the environment (`.env`, see `config.rs`), accounts and matches live
 //! in MariaDB (`migrations/`, run on startup).
 
@@ -11,6 +12,7 @@ mod api;
 mod auth;
 mod config;
 mod elo;
+mod leaderboard;
 mod limits;
 mod mail;
 mod matches;
@@ -60,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt: auth::Jwt::new(&cfg.jwt_secret, cfg.jwt_days),
         mailer: mail::Mailer::new(&cfg.mail).map_err(|e| format!("mail: {e}"))?,
         queue: Mutex::new(queue::Queue::default()),
+        quick: Mutex::new(queue::Queue::default()),
         limits: limits::Limiter::new(&cfg.limits),
         rooms: rooms.clone(),
     });
@@ -115,6 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if client_protocol != protocol {
                 warn!(origin = %meta.origin, %room, %client_protocol, "refused: protocol mismatch (server {protocol})");
                 return Err((axum::http::StatusCode::UPGRADE_REQUIRED, format!("client protocol {client_protocol} != server {protocol}")).into_response());
+            }
+            // A presence socket joins no room: it is counted, not seated (`rooms.rs`).
+            if room == rooms::PRESENCE_PATH {
+                r_request.lock().unwrap().admit_presence(meta.origin);
+                return Ok(true);
             }
             // Reserve the slot now, before the upgrade, so two simultaneous joins cannot both get
             // in; `rooms.rs` confirms it once the socket is open and sweeps it if that never happens.

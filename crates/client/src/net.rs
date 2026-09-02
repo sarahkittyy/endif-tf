@@ -1,8 +1,9 @@
 //! Room-based peer-to-peer connection: a matchbox WebRTC socket for signaling/transport and a GGRS
 //! session on top of its unreliable data channel. A second, reliable channel carries the one-off
-//! hello with each player's display name.
+//! hello with each player's display name. A separate socket to the server's `/presence` path,
+//! held open for as long as the app runs, is how the server counts who is online (`keep_presence`).
 
-use crate::account::MatchInfo;
+use crate::account::{MatchInfo, QuickMatch};
 use crate::config::{ClientConfig, seed_from_room};
 use crate::menu::UiRefresh;
 use crate::{AppState, GameEntity};
@@ -11,7 +12,7 @@ use bevy::tasks::IoTaskPool;
 use bevy_ggrs::prelude::*;
 use bevy_ggrs::{LocalPlayers, ggrs::DesyncDetection};
 use endif_sim::PlayerInput;
-use matchbox_socket::{ChannelConfig, PeerId, PeerState, WebRtcChannel, WebRtcSocket};
+use matchbox_socket::{ChannelConfig, MessageLoopFuture, PeerId, PeerState, WebRtcChannel, WebRtcSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,6 +50,9 @@ pub enum MatchKind {
     Practice,
     /// Peer-to-peer private room. No ratings; finished rounds go into the history as casual.
     Room { code: String },
+    /// A quick play pairing: like a private room (unrated, rounds go on until someone leaves),
+    /// but the queue picked the opponent.
+    Quick(QuickMatch),
     /// A matchmade game between two accounts; the result is reported and rated.
     Ranked(MatchInfo),
 }
@@ -191,6 +195,18 @@ const PROBE_TIMEOUT: f64 = 8.0;
 const PROBE_INTERVAL: f64 = 15.0;
 /// Pause between probes after a failure.
 const PROBE_RETRY: f64 = 5.0;
+/// Pause before the presence socket is opened again after it dropped (or was refused).
+const PRESENCE_RETRY: f64 = 20.0;
+
+/// The socket that counts this client as online: `/presence` on the signaling server (see the
+/// server's `rooms.rs`), opened when the app starts, kept for its whole life and reopened when it
+/// drops. One per running client, in the menu or in a match alike, so nobody is counted twice.
+#[derive(Resource, Default)]
+pub struct Presence {
+    socket: Option<WebRtcSocket>,
+    loop_result: Option<LoopResult>,
+    retry_at: f64,
+}
 
 /// A session waiting for the match resources to exist. `game::setup_match` moves it into the
 /// real `Session` resource so GGRS never runs before the simulation state is in place.
@@ -210,8 +226,10 @@ pub struct MatchSeed(pub u64);
 pub enum NetCommand {
     CreateRoom,
     JoinRoom(String),
-    /// The queue paired us: join the match's room.
+    /// The competitive queue paired us: join the match's room.
     StartRanked(MatchInfo),
+    /// The quick play queue paired us: join the room.
+    StartQuick(QuickMatch),
     Practice,
     Leave,
 }
@@ -252,7 +270,8 @@ impl Plugin for NetPlugin {
             .init_resource::<SignalingStatus>()
             .init_resource::<PlayerNames>()
             .init_resource::<MatchExit>()
-            .add_systems(Update, handle_net_commands)
+            .init_resource::<Presence>()
+            .add_systems(Update, (handle_net_commands, keep_presence))
             .add_systems(Update, probe_signaling.run_if(in_state(AppState::Menu).or_else(in_state(AppState::Connecting))))
             .add_systems(OnEnter(AppState::Menu), |mut s: ResMut<SignalingStatus>| s.next_probe_at = 0.0)
             .add_systems(OnEnter(AppState::InGame), |mut s: ResMut<SignalingStatus>, mut e: ResMut<MatchExit>| {
@@ -278,6 +297,11 @@ fn open_socket(url: &str, cfg: &ClientConfig) -> (WebRtcSocket, LoopResult) {
         .add_channel(ChannelConfig::reliable())
         .reconnect_attempts(Some(1))
         .build();
+    (socket, spawn_signaling(loop_fut))
+}
+
+/// Runs a socket's signaling loop in the background; the returned slot is filled when it ends.
+fn spawn_signaling(loop_fut: MessageLoopFuture) -> LoopResult {
     let result: LoopResult = Arc::new(Mutex::new(None));
     let slot = result.clone();
     let run = async move {
@@ -294,7 +318,31 @@ fn open_socket(url: &str, cfg: &ClientConfig) -> (WebRtcSocket, LoopResult) {
     #[cfg(target_arch = "wasm32")]
     IoTaskPool::get().spawn_local(run).detach();
 
-    (socket, result)
+    result
+}
+
+/// Keeps the presence socket open. The server pings it and the browser (or the native websocket)
+/// answers on its own, so it stays up in a background tab too; it only drops when the tab or the
+/// app is closed, the connection dies or the server restarts, and is then reopened after a pause.
+fn keep_presence(mut presence: ResMut<Presence>, status: Res<SignalingStatus>, cfg: Res<ClientConfig>, time: Res<Time<Real>>) {
+    let now = time.elapsed_secs_f64();
+    if presence.socket.is_some() {
+        if presence.loop_result.as_ref().is_some_and(|r| r.lock().unwrap().is_some()) {
+            info!("presence connection ended; reconnecting in {PRESENCE_RETRY}s");
+            presence.socket = None;
+            presence.loop_result = None;
+            presence.retry_at = now + PRESENCE_RETRY;
+        }
+        return;
+    }
+    // An out-of-date build would only be turned away (426) until it has updated.
+    if now < presence.retry_at || status.is_outdated() {
+        return;
+    }
+    let (socket, loop_fut) = WebRtcSocket::builder(cfg.presence_url()).add_channel(ChannelConfig::reliable()).reconnect_attempts(Some(1)).build();
+    presence.loop_result = Some(spawn_signaling(loop_fut));
+    presence.socket = Some(socket);
+    presence.retry_at = now + PRESENCE_RETRY;
 }
 
 /// Polls `GET /version` while in the menus: the server's protocol identity means it is up (and
@@ -390,6 +438,13 @@ fn handle_net_commands(
                     continue;
                 }
                 start_room(&mut commands, &cfg, info.room.clone(), MatchKind::Ranked(info.clone()), &mut next);
+            }
+            NetCommand::StartQuick(info) => {
+                if status.is_down() {
+                    warn!("matchmaking server unreachable; not joining the quick play room");
+                    continue;
+                }
+                start_room(&mut commands, &cfg, info.room.clone(), MatchKind::Quick(info.clone()), &mut next);
             }
             NetCommand::Practice => {
                 let session = SessionBuilder::<Config>::new()
@@ -579,11 +634,12 @@ fn poll_room(
         builder = builder.add_player(ty, handle).expect("add player");
     }
 
-    // Names: ours, and the opponent's from the server for ranked games (a private room's opponent
-    // introduces themselves over the reliable channel once the session runs).
+    // Names: ours, and the opponent's from the server for matchmade games (a private room's
+    // opponent introduces themselves over the reliable channel once the session runs).
     let my_name = account.display_name();
     let their_name = match kind.as_deref() {
         Some(MatchKind::Ranked(info)) => info.opponent.clone(),
+        Some(MatchKind::Quick(info)) => info.opponent.clone(),
         _ => String::new(),
     };
     names.0 = if local_handle == 0 { [my_name.clone(), their_name] } else { [their_name, my_name.clone()] };
