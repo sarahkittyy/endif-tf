@@ -44,13 +44,19 @@ pub struct Rules {
     pub disable_damage_spread: bool,
     /// MGE `fraglimit`.
     pub frag_limit: i32,
-    /// Ticks between death and respawn.
+    /// Ticks between death and respawn. Zero means the player is back on the very next tick.
     pub respawn_delay_ticks: u32,
+    /// Ticks both players stay dead after a round is won, before the next round's spawn.
+    pub round_reset_delay_ticks: u32,
     /// Whether the MGE endif `BoostVectors` multiplier is applied.
     pub endif_boost: bool,
     /// endif.tf house rule (not in MGEMod): a player who was killed respawns this many units above
     /// the spawn point, still in the air, so the opponent can chain airshots.
     pub respawn_height: u32,
+    /// endif.tf house rule: a high respawn is flung sideways so the fall is not a vertical line.
+    /// The angle, in degrees off vertical, between the spawn point and where an untouched fall
+    /// would land; drawn uniformly from this inclusive range with the simulation RNG.
+    pub respawn_fling_deg: (u32, u32),
 }
 
 impl Default for Rules {
@@ -58,9 +64,11 @@ impl Default for Rules {
         Rules {
             disable_damage_spread: true,
             frag_limit: MGE_FRAG_LIMIT,
-            respawn_delay_ticks: 67,
+            respawn_delay_ticks: 0,
+            round_reset_delay_ticks: 67,
             endif_boost: true,
             respawn_height: 768,
+            respawn_fling_deg: (25, 35),
         }
     }
 }

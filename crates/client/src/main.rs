@@ -26,6 +26,7 @@ mod icon;
 
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::prelude::*;
+use bevy::render::error_handler::{ErrorType, RenderErrorHandler, RenderErrorPolicy};
 use bevy::window::{PresentMode, WindowResolution};
 
 /// Top-level application state.
@@ -92,6 +93,18 @@ fn main() {
             }),
     )
     .init_state::<AppState>()
+    // Bevy's default handler quits on any wgpu error. On the web the browser expires the canvas
+    // swap chain texture when the tab is hidden (or resized) mid-frame, which shows up as a
+    // validation error on a destroyed 'swap chain texture'. The next frame acquires a fresh one,
+    // so that case is skipped; everything else keeps the default quit-on-error behaviour.
+    .insert_resource(RenderErrorHandler(|error, main_world, _| {
+        if error.ty == ErrorType::Validation && error.description.contains("swap chain texture") {
+            return RenderErrorPolicy::Ignore;
+        }
+        error!("Quitting the application due to {:?} RenderError", error.ty);
+        main_world.write_message(AppExit::error());
+        RenderErrorPolicy::StopRendering
+    }))
     .insert_resource(settings::Settings::load());
     let cfg = config::ClientConfig::load();
     app.insert_resource(account::Account::load(cfg.player_name.clone())).insert_resource(cfg)

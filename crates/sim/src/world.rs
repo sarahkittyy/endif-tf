@@ -144,8 +144,20 @@ impl SimState {
         // counts as inside it, so trace down from slightly above and rest DIST_EPSILON over it.
         let mut origin = drop_to_floor(&arena.brushes, &self.players[idx]);
         if high {
-            // House rule: after a death you come back high above the spawn, airborne.
-            origin.z += self.rules.respawn_height as f32;
+            // House rule: after a death you come back high above the spawn, airborne, with a
+            // sideways fling so the fall is not a predictable vertical line. The fling is a
+            // horizontal velocity sized so that an untouched fall lands `tan(angle) * height`
+            // from the spawn point, in a random direction within `RESPAWN_FLING_YAW_SPREAD` of
+            // the spawn's facing (towards the arena centre) so it never lands in a wall.
+            // Both draws come from the rolled-back simulation RNG, so peers agree.
+            let height = self.rules.respawn_height as f32;
+            origin.z += height;
+            let (lo, hi) = self.rules.respawn_fling_deg;
+            let angle = deg2rad(self.rng.random_int(lo as i32, hi as i32) as f32);
+            let yaw = deg2rad(spawn.angles.yaw + self.rng.random_float(-RESPAWN_FLING_YAW_SPREAD, RESPAWN_FLING_YAW_SPREAD));
+            let fall_time = sqrtf(2.0 * height / SV_GRAVITY);
+            let speed = sinf(angle) / cosf(angle) * height / fall_time;
+            self.players[idx].velocity = Vec3::new(cosf(yaw) * speed, sinf(yaw) * speed, 0.0);
         }
         self.players[idx].origin = origin;
         self.events.push(SimEvent::Respawn { player: idx as u8, origin });
@@ -174,10 +186,12 @@ impl SimState {
                 for p in &mut self.players {
                     p.score = 0;
                 }
-                // Both players are reset for the next round, on the floor.
+                // Both players are reset for the next round, on the floor, after the round-end pause.
+                let reset_tick = self.tick + self.rules.round_reset_delay_ticks;
                 self.players[attacker].alive = false;
-                self.players[attacker].respawn_tick = self.tick + self.rules.respawn_delay_ticks;
+                self.players[attacker].respawn_tick = reset_tick;
                 self.players[attacker].respawn_high = false;
+                self.players[victim].respawn_tick = reset_tick;
                 self.players[victim].respawn_high = false;
                 let _ = arena;
             }

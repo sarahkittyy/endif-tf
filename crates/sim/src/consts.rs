@@ -135,3 +135,8 @@ pub const MGE_INFAMMO_REFILL_DELAY: f32 = 0.4;
 pub const MGE_FRAG_LIMIT: i32 = 5;
 /// Minimum distance between a fresh spawn and the opponent (`mindist`).
 pub const MGE_MIN_SPAWN_DIST: f32 = 100.0;
+
+/// Half-width, in degrees, of the random yaw around the spawn's facing direction that a high
+/// respawn is flung towards (see `Rules::respawn_fling_deg`). The spawns sit 300 units from the
+/// centre of a 416-unit half-size square, so ±45° keeps the longest fling inside the walls.
+pub const RESPAWN_FLING_YAW_SPREAD: f32 = 45.0;

@@ -42,11 +42,83 @@ pub struct LookAngles {
     pub yaw: f32,
 }
 
-/// Simulation events that happened on a freshly simulated (not re-simulated) frame.
+/// Simulation events for the presentation layer this frame.
+///
+/// A rollback re-steps frames that were already simulated once. Events from those frames were
+/// mostly surfaced the first time around, but anything that only exists because of a late remote
+/// input (their rocket firing, flying and exploding before the input arrived) has never been seen.
+/// `played` remembers, per frame, which events were already handed out so that a re-simulated frame
+/// surfaces only what is new for it. Events that were played in prediction and then didn't happen
+/// cannot be taken back; that is the usual rollback trade-off.
 #[derive(Resource, Default)]
 pub struct PendingFx {
     pub events: Vec<SimEvent>,
-    pub last_frame: i32,
+    /// Sorted by frame. Bounded to the frames a rollback can still reach.
+    played: std::collections::VecDeque<(i32, Vec<FxKey>)>,
+}
+
+/// Identity of an event for de-duplication across re-simulations. Rocket ids and positions are
+/// deliberately left out: a late remote shot inserted before a local one shifts the local rocket's
+/// id, and positions differ slightly between the predicted and the real frame, so matching on them
+/// would replay the local player's own shot. A player fires at most once per tick, so kind + player
+/// is a stable identity.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FxKey {
+    RocketFired(u8),
+    Explosion(Option<u8>),
+    PlayerHit { victim: u8, attacker: u8 },
+    Killed { victim: u8, attacker: u8 },
+    Respawn(u8),
+    RoundWon(u8),
+    Landed(u8),
+    Jumped(u8),
+}
+
+impl FxKey {
+    fn of(ev: &SimEvent) -> Self {
+        match *ev {
+            SimEvent::RocketFired { shooter, .. } => FxKey::RocketFired(shooter),
+            SimEvent::Explosion { hit_player, .. } => FxKey::Explosion(hit_player),
+            SimEvent::PlayerHit { victim, attacker, .. } => FxKey::PlayerHit { victim, attacker },
+            SimEvent::Killed { victim, attacker } => FxKey::Killed { victim, attacker },
+            SimEvent::Respawn { player, .. } => FxKey::Respawn(player),
+            SimEvent::RoundWon { winner, .. } => FxKey::RoundWon(winner),
+            SimEvent::Landed { player, .. } => FxKey::Landed(player),
+            SimEvent::Jumped { player } => FxKey::Jumped(player),
+        }
+    }
+}
+
+/// Frames of `played` history to keep. A rollback never reaches further back than the prediction
+/// window; the margin covers the frame the rollback lands on and any off-by-one in GGRS's counting.
+const FX_HISTORY: i32 = crate::net::MAX_PREDICTION as i32 + 4;
+
+impl PendingFx {
+    /// Queues the events of `frame` that haven't been surfaced by an earlier simulation of it.
+    fn push_frame(&mut self, frame: i32, events: &[SimEvent]) {
+        while self.played.front().is_some_and(|(f, _)| *f < frame - FX_HISTORY) {
+            self.played.pop_front();
+        }
+        let idx = match self.played.binary_search_by_key(&frame, |(f, _)| *f) {
+            Ok(i) => i,
+            Err(i) => {
+                self.played.insert(i, (frame, Vec::new()));
+                i
+            }
+        };
+        let record = &mut self.played[idx].1;
+        // Each already-played key absorbs one matching event; the rest are new.
+        let mut unmatched = record.clone();
+        for ev in events {
+            let key = FxKey::of(ev);
+            if let Some(pos) = unmatched.iter().position(|k| *k == key) {
+                unmatched.swap_remove(pos);
+            } else {
+                record.push(key);
+                self.events.push(ev.clone());
+            }
+        }
+    }
 }
 
 /// Whether the mouse is captured for looking. On the web this is reconciled with the browser's
@@ -193,7 +265,7 @@ fn setup_match(
     sim.step(&arena.0, [PlayerInput::default(); 2]);
     // Face the local player toward the arena centre; the live look angles start from the spawn angles.
     commands.insert_resource(RenderStates { prev: sim.clone(), cur: sim.clone(), last_advance: time.elapsed_secs_f64() });
-    commands.insert_resource(PendingFx { events: Vec::new(), last_frame: -1 });
+    commands.insert_resource(PendingFx::default());
     commands.insert_resource(SimRes(sim));
     commands.insert_resource(LookAngles::default());
     commands.insert_resource(MouseCaptured(false));
@@ -351,11 +423,7 @@ fn step_sim(
     }
     sim.0.step(&arena.0, ins);
 
-    let frame_no = i32::from(*frame);
-    if frame_no > fx.last_frame {
-        fx.last_frame = frame_no;
-        fx.events.extend(sim.0.events.iter().cloned());
-    }
+    fx.push_frame(i32::from(*frame), &sim.0.events);
 
     states.prev = std::mem::replace(&mut states.cur, sim.0.clone());
     states.last_advance = time.elapsed_secs_f64();
