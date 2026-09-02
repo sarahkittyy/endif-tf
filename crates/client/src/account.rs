@@ -9,7 +9,7 @@
 use crate::config::ClientConfig;
 use crate::game::{PendingFx, RenderStates};
 use crate::menu::{UiRefresh, UiScreen};
-use crate::net::{LocalHandle, MatchExit, MatchKind, NetCommand};
+use crate::net::{LocalHandle, MatchExit, MatchKind, NetCommand, PlayerNames, SignalState, SignalingStatus};
 use crate::settings::storage;
 use crate::textfield::{Field, Form};
 use crate::AppState;
@@ -24,6 +24,8 @@ pub const NAME_MAX: usize = 20;
 const STORE: &str = "account.json";
 /// How often the queue is polled.
 const QUEUE_POLL_SECS: f64 = 1.5;
+/// How often the main menu asks how many players are searching.
+const SEARCHING_POLL_SECS: f64 = 5.0;
 /// How long the result banner stays up before a finished ranked match returns to the menu.
 const RANKED_EXIT_SECS: f64 = 4.0;
 /// How often the result popup asks the server whether the match has been settled.
@@ -50,15 +52,26 @@ pub struct UserInfo {
 #[allow(dead_code)]
 pub struct HistoryEntry {
     pub id: u64,
+    /// False for a private-room round: no ratings, and it counted for nothing.
+    #[serde(default = "yes")]
+    pub ranked: bool,
     pub opponent: String,
     pub my_score: i32,
     pub their_score: i32,
     pub won: bool,
-    pub my_elo: i32,
-    pub their_elo: i32,
-    pub delta: i32,
+    /// Ratings at match time and the change; absent on casual rounds.
+    #[serde(default)]
+    pub my_elo: Option<i32>,
+    #[serde(default)]
+    pub their_elo: Option<i32>,
+    #[serde(default)]
+    pub delta: Option<i32>,
     /// Unix seconds.
     pub played_at: i64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -103,7 +116,11 @@ pub enum Req {
     QueueJoin,
     QueuePoll,
     QueueLeave,
+    /// How many players are searching, for the main menu.
+    QueueCount,
     Report,
+    /// A private-room round for the history.
+    Casual,
     /// Whether a finished match has been settled yet (the result popup).
     MatchStatus,
 }
@@ -111,7 +128,7 @@ pub enum Req {
 impl Req {
     /// Requests the forms wait on (buttons show "working...").
     fn blocks(self) -> bool {
-        !matches!(self, Req::Me | Req::QueuePoll | Req::QueueLeave | Req::Report | Req::MatchStatus)
+        !matches!(self, Req::Me | Req::QueuePoll | Req::QueueLeave | Req::QueueCount | Req::Report | Req::Casual | Req::MatchStatus)
     }
 }
 
@@ -126,6 +143,8 @@ pub struct QueueState {
     pub ticket: Option<String>,
     pub next_poll: f64,
     pub position: usize,
+    /// Players in the queue, us included (0 until the server has answered).
+    pub waiting: usize,
     pub since: f64,
 }
 
@@ -177,6 +196,11 @@ pub struct Account {
     pub error: Option<String>,
     pub notice: Option<String>,
     pub queue: Option<QueueState>,
+    /// Players searching for a match right now, as last reported; `None` until the server has
+    /// answered (or after it stopped answering).
+    pub searching: Option<usize>,
+    /// Menu time of the next `/queue` count request.
+    next_searching_poll: f64,
     /// The ranked match that just ended, until its popup is dismissed.
     pub result: Option<RankedResult>,
     requests: Vec<Pending>,
@@ -208,6 +232,8 @@ impl Account {
             error: None,
             notice: None,
             queue: None,
+            searching: None,
+            next_searching_poll: 0.0,
             result: None,
             requests: Vec::new(),
         }
@@ -335,7 +361,7 @@ impl Account {
     }
 
     pub fn join_queue(&mut self, cfg: &ClientConfig, now: f64) {
-        self.queue = Some(QueueState { ticket: None, next_poll: now, position: 0, since: now });
+        self.queue = Some(QueueState { ticket: None, next_poll: now, position: 0, waiting: 0, since: now });
         self.call(cfg, Req::QueueJoin, "/queue/join", Some(json!({})));
     }
 
@@ -351,9 +377,24 @@ impl Account {
         self.call(cfg, Req::QueuePoll, "/queue/poll", Some(json!({ "ticket": ticket })));
     }
 
+    /// Asks how many players are searching (the main menu's "(N searching)").
+    fn fetch_searching(&mut self, cfg: &ClientConfig) {
+        if !self.in_flight(Req::QueueCount) {
+            self.call(cfg, Req::QueueCount, "/queue", None);
+        }
+    }
+
     /// Sends this player's view of a ranked result: `score` in match-record order (a, b).
     pub fn report(&mut self, cfg: &ClientConfig, match_id: u64, score: [i32; 2], winner: u8) {
         self.call(cfg, Req::Report, &format!("/match/{match_id}/report"), Some(json!({ "score": score, "winner": winner })));
+    }
+
+    /// Records a finished private-room round in the history (logged-in players only).
+    pub fn report_casual(&mut self, cfg: &ClientConfig, room: &str, opponent: &str, score: [i32; 2], won: bool) {
+        if !self.logged_in() {
+            return;
+        }
+        self.call(cfg, Req::Casual, "/match/casual", Some(json!({ "room": room, "opponent": opponent, "score": score, "won": won })));
     }
 
     /// Remembers how the ranked match that just ended went, for the popup on the main menu.
@@ -388,9 +429,16 @@ impl Plugin for AccountPlugin {
             .add_systems(OnEnter(AppState::InGame), |mut r: ResMut<RankedState>| *r = RankedState::default())
             .add_systems(
                 Update,
-                (poll_requests, queue_tick.run_if(in_state(AppState::Menu)), result_poll.run_if(in_state(AppState::Menu)), sync_anon_name.run_if(in_state(AppState::Menu))).chain(),
+                (
+                    poll_requests,
+                    queue_tick.run_if(in_state(AppState::Menu)),
+                    searching_tick.run_if(in_state(AppState::Menu)),
+                    result_poll.run_if(in_state(AppState::Menu)),
+                    sync_anon_name.run_if(in_state(AppState::Menu)),
+                )
+                    .chain(),
             )
-            .add_systems(Update, ranked_round_end.run_if(in_state(AppState::InGame)))
+            .add_systems(Update, (ranked_round_end, casual_round_end).run_if(in_state(AppState::InGame)))
             .add_systems(OnExit(AppState::InGame), ranked_exit.before(crate::net::teardown_match));
     }
 }
@@ -458,7 +506,8 @@ fn poll_requests(
         // on its own); rebuilding the screen for it flashes the backdrop. A match or a refusal
         // switches screens, which rebuilds anyway. The result popup's poll refreshes only once
         // the answer changes what it shows.
-        if !matches!(kind, Req::QueuePoll | Req::MatchStatus) {
+        // The searching count is a label that updates in place.
+        if !matches!(kind, Req::QueuePoll | Req::MatchStatus | Req::QueueCount) {
             refresh.0 = true;
         }
         match (kind, outcome(result)) {
@@ -518,6 +567,7 @@ fn poll_requests(
             (Req::QueueJoin, Ok(v)) => {
                 if let Some(q) = account.queue.as_mut() {
                     q.ticket = v["ticket"].as_str().map(str::to_string);
+                    q.waiting = v["waiting"].as_u64().unwrap_or(0) as usize;
                 }
             }
             (Req::QueueJoin, Err((msg, _))) => {
@@ -541,6 +591,7 @@ fn poll_requests(
                 "waiting" => {
                     if let Some(q) = account.queue.as_mut() {
                         q.position = v["position"].as_u64().unwrap_or(0) as usize;
+                        q.waiting = v["waiting"].as_u64().unwrap_or(0) as usize;
                     }
                 }
                 _ => {
@@ -560,8 +611,11 @@ fn poll_requests(
                     *screen = UiScreen::Main;
                 }
             }
-            (Req::QueueLeave | Req::Report, Ok(_)) => {}
+            (Req::QueueCount, Ok(v)) => account.searching = v["waiting"].as_u64().map(|n| n as usize),
+            (Req::QueueCount, Err(_)) => account.searching = None,
+            (Req::QueueLeave | Req::Report | Req::Casual, Ok(_)) => {}
             (Req::Report, Err((msg, _))) => warn!("result report refused: {msg}"),
+            (Req::Casual, Err((msg, _))) => warn!("casual round not recorded: {msg}"),
             (Req::MatchStatus, Ok(v)) => {
                 let Some(r) = account.result.as_mut() else { continue };
                 let rating = match v["status"].as_str().unwrap_or_default() {
@@ -607,6 +661,19 @@ fn queue_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, cfg: Res<Clie
     if !account.in_flight(Req::QueuePoll) && !account.in_flight(Req::QueueJoin) {
         account.poll_queue(&cfg, &ticket);
     }
+}
+
+/// Keeps the main menu's count of searching players current while it is up and the server answers.
+fn searching_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, status: Res<SignalingStatus>, cfg: Res<ClientConfig>, time: Res<Time<Real>>) {
+    if *screen != UiScreen::Main || status.state != SignalState::Up {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    if now < account.next_searching_poll {
+        return;
+    }
+    account.next_searching_poll = now + SEARCHING_POLL_SECS;
+    account.fetch_searching(&cfg);
 }
 
 /// The anonymous name box saves as it is typed.
@@ -661,6 +728,23 @@ fn ranked_round_end(
     {
         ranked.finished_at = None;
         next.set(AppState::Menu);
+    }
+}
+
+/// A round in a private room reached the frag limit: put it in the history. The room goes on
+/// (the sim resets the scores for the next round), so this fires once per round, and a round
+/// abandoned part-way is not recorded. The opponent is known by display name only.
+fn casual_round_end(fx: Res<PendingFx>, kind: Option<Res<MatchKind>>, local: Res<LocalHandle>, names: Res<PlayerNames>, cfg: Res<ClientConfig>, mut account: ResMut<Account>) {
+    let Some(MatchKind::Room { code }) = kind.as_deref() else { return };
+    for ev in &fx.events {
+        if let SimEvent::RoundWon { winner, score } = ev {
+            let me = local.0;
+            let opponent = names.0[1 - me].trim();
+            let opponent = if opponent.is_empty() { "unknown" } else { opponent };
+            let won = *winner as usize == me;
+            info!("casual round in {code} over: {}-{} vs {opponent}", score[me], score[1 - me]);
+            account.report_casual(&cfg, code, opponent, [score[me], score[1 - me]], won);
+        }
     }
 }
 

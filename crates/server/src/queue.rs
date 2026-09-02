@@ -110,6 +110,7 @@ impl Queue {
         self.waiting.retain(|w| w.ticket != ticket);
     }
 
+    /// Players waiting for an opponent (those already paired are not counted).
     pub fn len(&self) -> usize {
         self.waiting.len()
     }

@@ -92,11 +92,13 @@ pub fn router(state: AppState) -> Router {
     let rest = Router::new()
         .route("/me", get(me))
         .route("/profile/{username}", get(profile))
+        .route("/queue", get(queue_stats))
         .route("/queue/join", post(queue_join))
         .route("/queue/poll", post(queue_poll))
         .route("/queue/leave", post(queue_leave))
         .route("/match/{id}", get(match_status))
         .route("/match/{id}/report", post(match_report))
+        .route("/match/casual", post(match_casual))
         .route("/room/{code}", get(room_info));
     Router::new()
         .merge(register)
@@ -530,6 +532,12 @@ async fn profile(State(state): State<AppState>, Path(username): Path<String>) ->
 
 // ------------------------------------------------------------------------------------ matchmaking
 
+/// How many players are searching right now, for the main menu. No login needed.
+async fn queue_stats(State(state): State<AppState>) -> ApiResult {
+    let waiting = state.queue.lock().unwrap().len();
+    Ok(Json(json!({ "waiting": waiting })))
+}
+
 /// Enters the queue (or pairs with whoever is waiting). Poll `/queue/poll` with the ticket.
 async fn queue_join(State(state): State<AppState>, user: AuthUser) -> ApiResult {
     let me = load_user(&state.db, user.id, false).await?;
@@ -561,9 +569,13 @@ struct TicketReq {
 }
 
 async fn queue_poll(State(state): State<AppState>, _user: AuthUser, Json(req): Json<TicketReq>) -> ApiResult {
-    let result = state.queue.lock().unwrap().poll(&req.ticket);
+    let (result, waiting) = {
+        let mut queue = state.queue.lock().unwrap();
+        let result = queue.poll(&req.ticket);
+        (result, queue.len())
+    };
     Ok(Json(match result {
-        PollResult::Waiting { position } => json!({ "status": "waiting", "position": position }),
+        PollResult::Waiting { position } => json!({ "status": "waiting", "position": position, "waiting": waiting }),
         PollResult::Matched(m) => json!({ "status": "matched", "match": m }),
         PollResult::Expired => json!({ "status": "expired" }),
     }))
@@ -585,6 +597,21 @@ struct ReportReq {
 async fn match_report(State(state): State<AppState>, user: AuthUser, Path(id): Path<u64>, Json(req): Json<ReportReq>) -> ApiResult {
     matches::report(&state.db, id, user.id, Report { score_a: req.score[0], score_b: req.score[1], winner: req.winner }).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct CasualReq {
+    room: String,
+    opponent: String,
+    /// `[mine, theirs]`.
+    score: [i32; 2],
+    won: bool,
+}
+
+/// A round of a private room reached the frag limit: kept for the caller's history only.
+async fn match_casual(State(state): State<AppState>, user: AuthUser, Json(req): Json<CasualReq>) -> ApiResult {
+    let id = matches::casual(&state.db, (user.id, &user.username), req.room.trim(), req.opponent.trim(), req.score, req.won).await?;
+    Ok(Json(json!({ "ok": true, "id": id })))
 }
 
 /// Where one of the caller's matches stands, for the result popup after a game.

@@ -212,6 +212,14 @@ struct ConnectingText;
 #[derive(Component)]
 struct QueueText;
 
+/// The "N in queue" line under it.
+#[derive(Component)]
+struct QueueSizeText;
+
+/// The "(N searching)" label beside the main menu's "Find game" button.
+#[derive(Component)]
+struct SearchingText;
+
 /// Slider parts.
 #[derive(Component)]
 struct SliderTrack(Slider);
@@ -277,6 +285,7 @@ impl Plugin for MenuPlugin {
                     sync_settings_widgets,
                     disabled_tooltips,
                     queue_status,
+                    searching_count,
                     resend_timer,
                 )
                     .chain(),
@@ -582,11 +591,11 @@ fn rebuild_ui(
     }
 }
 
-/// A tan button, greyed out with a hover tooltip when `disabled`.
-fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: &str, action: UiAction, disabled: Option<&str>) {
+/// A tan button, greyed out with a hover tooltip when `disabled`. Returns the button entity.
+fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: &str, action: UiAction, disabled: Option<&str>) -> Entity {
     let mut e = c.spawn(button(theme, label, action));
     let Some(tooltip_text) = disabled else {
-        return;
+        return e.id();
     };
     e.insert((Disabled, BackgroundColor(BTN_DISABLED))).with_children(|b| {
         b.spawn((
@@ -604,6 +613,15 @@ fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: 
             children![(theme.label(tooltip_text, 13.0, theme::LIGHT_RED), no_wrap())],
         ));
     });
+    e.id()
+}
+
+/// "(N searching)" beside "Find game", or nothing while the count is unknown.
+fn searching_label(searching: Option<usize>) -> String {
+    match searching {
+        Some(n) => format!("({n} searching)"),
+        None => String::new(),
+    }
 }
 
 /// Top-right corner of the title screen: who you are. Logged in: the class icon and the account
@@ -680,7 +698,14 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
         }
 
         p.spawn(panel_column(18.0)).with_children(|c| {
-            online_button(c, theme, "Find game", UiAction::FindGame, ranked_offline);
+            let find = online_button(c, theme, "Find game", UiAction::FindGame, ranked_offline);
+            // Hangs off the button's right edge so the button itself stays centred in the column.
+            c.commands().entity(find).with_child((
+                SearchingText,
+                theme.label(searching_label(account.searching), 13.0, theme::TAN_LIGHT),
+                no_wrap(),
+                Node { position_type: PositionType::Absolute, left: Val::Percent(100.0), margin: UiRect::left(Val::Px(10.0)), ..default() },
+            ));
             c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
             online_button(c, theme, "Create private room", UiAction::CreateRoom, offline);
 
@@ -1082,11 +1107,24 @@ fn history_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, m: &Histo
         cell(r, 84.0, theme.label(ymd(m.played_at), 13.0, theme::TAN_DARK), JustifyContent::FlexStart);
         cell(r, 48.0, theme.heading_flat(result, 14.0, color), JustifyContent::FlexStart);
         cell(r, 58.0, theme.heading_flat(format!("{} - {}", m.my_score, m.their_score), 15.0, theme::TAN_LIGHT), JustifyContent::Center);
+        let vs = match m.their_elo {
+            Some(elo) => format!("vs {} ({elo})", m.opponent),
+            None => format!("vs {}", m.opponent),
+        };
         r.spawn(Node { flex_grow: 1.0, overflow: Overflow::clip(), ..default() }).with_children(|x| {
-            x.spawn((theme.label(format!("vs {} ({})", m.opponent, m.their_elo), 14.0, theme::OFF_WHITE), no_wrap()));
+            x.spawn((theme.label(vs, 14.0, theme::OFF_WHITE), no_wrap()));
         });
-        cell(r, 58.0, theme.heading_flat(format!("{:+}", m.delta), 15.0, color), JustifyContent::FlexEnd);
-        cell(r, 96.0, theme.label(format!("{} → {}", m.my_elo, m.my_elo + m.delta), 12.0, theme::TAN_DARK), JustifyContent::FlexEnd);
+        // Casual rounds carry no rating: the two rating cells say so instead.
+        match (m.ranked, m.my_elo, m.delta) {
+            (true, Some(elo), Some(delta)) => {
+                cell(r, 58.0, theme.heading_flat(format!("{delta:+}"), 15.0, color), JustifyContent::FlexEnd);
+                cell(r, 96.0, theme.label(format!("{elo} → {}", elo + delta), 12.0, theme::TAN_DARK), JustifyContent::FlexEnd);
+            }
+            _ => {
+                cell(r, 58.0, theme.label("", 15.0, theme::TAN_DARK), JustifyContent::FlexEnd);
+                cell(r, 96.0, theme.label("casual", 12.0, theme::TAN_DARK), JustifyContent::FlexEnd);
+            }
+        }
     });
 }
 
@@ -1127,7 +1165,7 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
             .with_children(|list| {
                 match account.profile.as_ref() {
                     Some(profile) if profile.matches.is_empty() => {
-                        list.spawn((theme.label("no ranked matches yet: press Find game", 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
+                        list.spawn((theme.label("no matches yet: press Find game, or play a round in a room", 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
                     }
                     Some(profile) => {
                         for m in &profile.matches {
@@ -1163,6 +1201,11 @@ fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account) {
                     r.spawn((QueueText, theme.heading_flat("SEARCHING FOR A GAME...", 18.0, theme::TAN_LIGHT), no_wrap()));
                 });
             c.spawn((
+                QueueSizeText,
+                theme.label(queue_size_label(account), 13.0, theme::TAN_LIGHT),
+                Node { margin: UiRect::bottom(Val::Px(4.0)), ..default() },
+            ));
+            c.spawn((
                 theme.label(format!("playing as {} ({} ELO)", account.display_name(), account.user.as_ref().map(|u| u.elo).unwrap_or(0)), 13.0, theme::OFF_WHITE),
                 Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() },
             ));
@@ -1187,17 +1230,49 @@ fn spawn_download(commands: &mut Commands, theme: &Theme) {
     });
 }
 
-/// Keeps the queue screen's status line ticking.
-fn queue_status(account: Res<Account>, time: Res<Time<Real>>, mut text: Query<&mut Text, With<QueueText>>) {
-    let Ok(mut t) = text.single_mut() else { return };
-    let want = match &account.queue {
-        Some(q) => {
-            let secs = (time.elapsed_secs_f64() - q.since).max(0.0) as u32;
-            let pos = if q.position > 1 { format!(" ({} ahead)", q.position - 1) } else { String::new() };
-            format!("SEARCHING FOR A GAME... {}:{:02}{pos}", secs / 60, secs % 60)
+/// "N in queue" (us included), or nothing until the server has said.
+fn queue_size_label(account: &Account) -> String {
+    match &account.queue {
+        Some(q) if q.waiting > 0 => format!("{} in queue", q.waiting),
+        _ => String::new(),
+    }
+}
+
+/// Keeps the queue screen's status lines ticking.
+fn queue_status(
+    account: Res<Account>,
+    time: Res<Time<Real>>,
+    mut text: Query<&mut Text, (With<QueueText>, Without<QueueSizeText>)>,
+    mut size: Query<&mut Text, (With<QueueSizeText>, Without<QueueText>)>,
+) {
+    if let Ok(mut t) = text.single_mut() {
+        let want = match &account.queue {
+            Some(q) => {
+                let secs = (time.elapsed_secs_f64() - q.since).max(0.0) as u32;
+                let pos = if q.position > 1 { format!(" ({} ahead)", q.position - 1) } else { String::new() };
+                format!("SEARCHING FOR A GAME... {}:{:02}{pos}", secs / 60, secs % 60)
+            }
+            None => "SEARCHING FOR A GAME...".to_string(),
+        };
+        if t.0 != want {
+            t.0 = want;
         }
-        None => "SEARCHING FOR A GAME...".to_string(),
-    };
+    }
+    if let Ok(mut t) = size.single_mut() {
+        let want = queue_size_label(&account);
+        if t.0 != want {
+            t.0 = want;
+        }
+    }
+}
+
+/// Keeps the main menu's "(N searching)" label current without rebuilding the screen.
+fn searching_count(account: Res<Account>, mut text: Query<&mut Text, With<SearchingText>>) {
+    if !account.is_changed() {
+        return;
+    }
+    let Ok(mut t) = text.single_mut() else { return };
+    let want = searching_label(account.searching);
     if t.0 != want {
         t.0 = want;
     }

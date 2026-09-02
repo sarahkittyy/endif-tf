@@ -1,5 +1,6 @@
-//! Ranked match records: creation when the queue pairs two players, result reports from both
-//! clients, settlement (Elo) and the history shown on profiles.
+//! Match records: creation when the queue pairs two players, result reports from both clients,
+//! settlement (Elo) and the history shown on profiles. Rounds played in private rooms are recorded
+//! too (`casual`), for the history only: they are never rated and do not count as wins or losses.
 //!
 //! The game itself runs peer-to-peer, so the server only ever hears what the clients say. Each
 //! player reports the final score; the match is settled when the two reports agree. A match with
@@ -19,6 +20,9 @@ use tracing::{info, warn};
 const LONE_REPORT_GRACE_SECS: i64 = 15;
 /// Matches nobody reported on are voided after this long.
 const ABANDONED_SECS: i64 = 60 * 60;
+/// A casual round reported by the second player this long after the first is paired with the
+/// first report instead of making a row of its own.
+const CASUAL_PAIR_SECS: i64 = 10 * 60;
 
 /// Inserts a match between `a` and `b` and returns its id.
 pub async fn create(db: &MySqlPool, room: &str, a: (u64, &str, i32), b: (u64, &str, i32)) -> Result<u64, ApiError> {
@@ -169,6 +173,61 @@ async fn settle(db: &MySqlPool, match_id: u64, r: Report) -> Result<(), ApiError
     Ok(())
 }
 
+/// Records a round of a private room from the reporter's point of view. Rooms are anonymous to
+/// the server, so this is the only thing it ever hears about them: the reporter's account, the
+/// opponent's display name and the score. When the opponent has an account and reported the same
+/// round first (mirrored names and score, same room), the reporter is attached to that row rather
+/// than making a second one, so a round shows up once on each profile. Nothing else changes: no
+/// rating, no win or loss count.
+pub async fn casual(db: &MySqlPool, reporter: (u64, &str), room: &str, opponent: &str, score: [i32; 2], won: bool) -> Result<u64, ApiError> {
+    if score[0] < 0 || score[1] < 0 || room.len() != 6 || opponent.is_empty() || opponent.len() > 24 {
+        return Err(ApiError::Bad("malformed report".into()));
+    }
+    let (id, name) = reporter;
+    let mut tx = db.begin().await?;
+    let twin = sqlx::query(
+        "SELECT id FROM matches WHERE ranked = 0 AND room_code = ? AND player_b IS NULL AND player_a <> ? \
+         AND name_a = ? AND name_b = ? AND score_a = ? AND score_b = ? AND created_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND \
+         ORDER BY id DESC LIMIT 1 FOR UPDATE",
+    )
+    .bind(room)
+    .bind(id)
+    .bind(opponent)
+    .bind(name)
+    .bind(score[1])
+    .bind(score[0])
+    .bind(CASUAL_PAIR_SECS)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let match_id = match twin {
+        Some(row) => {
+            let match_id: u64 = row.try_get("id")?;
+            sqlx::query("UPDATE matches SET player_b = ? WHERE id = ?").bind(id).bind(match_id).execute(&mut *tx).await?;
+            info!(match_id, "casual round: {name} joins the opponent's report");
+            match_id
+        }
+        None => {
+            let res = sqlx::query(
+                "INSERT INTO matches (room_code, ranked, player_a, player_b, name_a, name_b, elo_a, elo_b, score_a, score_b, winner, status, finished_at) \
+                 VALUES (?, 0, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, 'finished', UTC_TIMESTAMP())",
+            )
+            .bind(room)
+            .bind(id)
+            .bind(name)
+            .bind(opponent)
+            .bind(score[0])
+            .bind(score[1])
+            .bind(if won { 0i8 } else { 1i8 })
+            .execute(&mut *tx)
+            .await?;
+            info!("casual round in {room}: {name} {}-{} {opponent}", score[0], score[1]);
+            res.last_insert_id()
+        }
+    };
+    tx.commit().await?;
+    Ok(match_id)
+}
+
 /// Applies the timeouts to one match that is still `playing`: a lone report past its grace period
 /// settles, a match nobody reported on is voided once abandoned. A match holding both reports
 /// (left behind by an older server) is resolved right away.
@@ -272,20 +331,23 @@ pub async fn status(db: &MySqlPool, match_id: u64, viewer: u64) -> Result<Outcom
 #[derive(Serialize, Debug)]
 pub struct HistoryEntry {
     pub id: u64,
+    /// False for a private-room round: no ratings, and it counted for nothing.
+    pub ranked: bool,
     pub opponent: String,
     pub my_score: i32,
     pub their_score: i32,
     pub won: bool,
-    pub my_elo: i32,
-    pub their_elo: i32,
-    pub delta: i32,
+    /// Ratings at match time and the change; absent on casual rounds.
+    pub my_elo: Option<i32>,
+    pub their_elo: Option<i32>,
+    pub delta: Option<i32>,
     /// Unix seconds.
     pub played_at: i64,
 }
 
 pub async fn history(db: &MySqlPool, account_id: u64, limit: u32) -> Result<Vec<HistoryEntry>, ApiError> {
     let rows = sqlx::query(
-        "SELECT id, player_a, name_a, name_b, elo_a, elo_b, score_a, score_b, winner, delta_a, delta_b, finished_at \
+        "SELECT id, ranked, player_a, name_a, name_b, elo_a, elo_b, score_a, score_b, winner, delta_a, delta_b, finished_at \
          FROM matches WHERE status = 'finished' AND (player_a = ? OR player_b = ?) ORDER BY id DESC LIMIT ?",
     )
     .bind(account_id)
@@ -302,6 +364,7 @@ pub async fn history(db: &MySqlPool, account_id: u64, limit: u32) -> Result<Vec<
         let finished: Option<NaiveDateTime> = row.try_get("finished_at")?;
         out.push(HistoryEntry {
             id: row.try_get("id")?,
+            ranked: row.try_get::<bool, _>("ranked")?,
             opponent: row.try_get(format!("name_{theirs}").as_str())?,
             my_score: row.try_get(format!("score_{mine}").as_str())?,
             their_score: row.try_get(format!("score_{theirs}").as_str())?,

@@ -47,12 +47,8 @@ const MSG_HELLO: u8 = 1;
 pub enum MatchKind {
     /// Local sync-test session, both players controlled locally (player 1 idle).
     Practice,
-    /// Peer-to-peer private room. No ratings.
-    Room {
-        /// Kept for logging / future spectator UI; the HUD no longer shows it.
-        #[allow(dead_code)]
-        code: String,
-    },
+    /// Peer-to-peer private room. No ratings; finished rounds go into the history as casual.
+    Room { code: String },
     /// A matchmade game between two accounts; the result is reported and rated.
     Ranked(MatchInfo),
 }
