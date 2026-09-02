@@ -51,6 +51,8 @@ const ASSET_DIR: &str = match option_env!("ENDIF_ASSET_DIR") {
 fn main() {
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
+    #[cfg(target_os = "linux")]
+    prefer_reachable_display();
 
     let mut app = App::new();
     app.add_plugins(
@@ -103,4 +105,34 @@ fn main() {
     ))
     .add_plugins((warmup::WarmupPlugin, hud::HudPlugin, loading::LoadingPlugin));
     app.run();
+}
+
+/// winit picks Wayland whenever `WAYLAND_DISPLAY` is set and never falls back to X11, so on a box
+/// where the variable is set but no compositor is listening (WSL with a third-party X server, a
+/// stale login environment) the window fails to open although `DISPLAY` would work. When the
+/// Wayland socket is missing and an X display is named, drop the variable so winit uses X11.
+/// `WINIT_UNIX_BACKEND=x11|wayland` still overrides everything.
+#[cfg(target_os = "linux")]
+fn prefer_reachable_display() {
+    use std::{env, path::Path};
+    if env::var_os("WINIT_UNIX_BACKEND").is_some() {
+        return;
+    }
+    let Some(wayland) = env::var("WAYLAND_DISPLAY").ok().filter(|v| !v.is_empty()) else { return };
+    if env::var("DISPLAY").map(|v| v.is_empty()).unwrap_or(true) {
+        return;
+    }
+    let socket = if wayland.starts_with('/') {
+        Path::new(&wayland).to_path_buf()
+    } else {
+        match env::var("XDG_RUNTIME_DIR") {
+            Ok(dir) if !dir.is_empty() => Path::new(&dir).join(&wayland),
+            _ => return,
+        }
+    };
+    if !socket.exists() {
+        eprintln!("WAYLAND_DISPLAY={wayland} but {} does not exist; using X11 (DISPLAY)", socket.display());
+        // The process is still single-threaded here (before Bevy starts its task pools).
+        unsafe { env::remove_var("WAYLAND_DISPLAY") };
+    }
 }

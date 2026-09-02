@@ -1,15 +1,16 @@
 # Production deploy of endif.tf.
 #
 #   server     on the self-hosted runner on sarahvps2: checkout in place, run the migrations,
-#              build endif-server and the web client, publish dist/, install the nginx and
-#              supervisord configs from deploy/, restart the server.
+#              build endif-server and the web client, publish dist/, restart the server.
 #   desktop    on GitHub's hosted runners: release builds for Windows and Linux, packaged by
 #              deploy/package-desktop.sh and uploaded as artifacts.
 #   downloads  back on sarahvps2: copies those packages to /srv/endif/download, which nginx serves
 #              as https://endif.tf/download/{windows,linux}.
 #
-# One-time setup on the box is described in the README ("Deployment"). The production .env lives
-# at /srv/endif/.env and is symlinked into the checkout; nothing secret is stored on GitHub.
+# The nginx site and the supervisord program are installed once by hand and the workflow never
+# touches them (deploy/nginx and deploy/supervisor are gitignored local copies of what is on the
+# box, with the install commands in their comments). The production .env lives at
+# /srv/endif/.env and is symlinked into the checkout; nothing secret is stored on GitHub.
 name: Deploy
 
 on:
@@ -65,21 +66,8 @@ jobs:
       - name: Publish the web client
         run: rsync -a --delete dist/ /srv/endif/dist/
 
-      - name: nginx
-        run: |
-          if ! sudo cmp -s deploy/nginx/endif.tf.conf /etc/nginx/sites-available/endif.tf; then
-            sudo cp deploy/nginx/endif.tf.conf /etc/nginx/sites-available/endif.tf
-            sudo ln -sfn /etc/nginx/sites-available/endif.tf /etc/nginx/sites-enabled/endif.tf
-            sudo nginx -t
-            sudo systemctl reload nginx
-          fi
-
       - name: Restart the server
-        run: |
-          sed "s|__WORKSPACE__|$GITHUB_WORKSPACE|g" deploy/supervisor/endif-server.conf > /etc/supervisor/conf.d/endif-server.conf
-          sudo supervisorctl reread
-          sudo supervisorctl update
-          sudo supervisorctl restart endif-server
+        run: sudo supervisorctl restart endif-server
 
       - name: Health check
         run: |
@@ -111,9 +99,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Caches ~/.cargo (registry, git checkouts) and the dependency artifacts under target/, keyed
+      # on Cargo.lock and the toolchain. Only the workspace crates (sim, client) are compiled again on
+      # a hit. Saved even when the build fails, so one broken push does not cost the next a cold
+      # build of Bevy.
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.name }}
+          cache-on-failure: true
 
       - name: Linux build dependencies
         if: matrix.name == 'linux'
