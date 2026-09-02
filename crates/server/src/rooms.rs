@@ -73,6 +73,16 @@ impl Rooms {
         self.counts.get(room).copied().unwrap_or(0)
     }
 
+    /// Players in a game: connected peers in rooms holding at least two of them. A peer alone in
+    /// its room is waiting for an opponent, not playing.
+    pub fn playing(&self) -> usize {
+        let mut per_room: HashMap<&str, usize> = HashMap::new();
+        for p in self.by_peer.values().filter(|p| p.connected) {
+            *per_room.entry(p.room.as_str()).or_default() += 1;
+        }
+        per_room.values().filter(|&&n| n >= 2).sum()
+    }
+
     /// Reserves a slot for a handshake from `origin`. `Ok(taken)` with the new occupancy, or
     /// `Err(taken)` when the room is full.
     pub fn admit(&mut self, origin: SocketAddr, room: &str) -> Result<usize, usize> {
@@ -265,6 +275,24 @@ mod tests {
         assert_eq!(r.occupancy("endif-A"), 1);
         r.by_peer.get_mut("p2").unwrap().since = Instant::now() - ADMISSION_GRACE * 2;
         assert_eq!(r.sweep(), 0, "connected peers are never swept");
+    }
+
+    #[test]
+    fn playing_counts_full_rooms_only() {
+        let mut r = Rooms::new(2);
+        r.admit(addr(1), "endif-A").unwrap();
+        r.admit(addr(2), "endif-A").unwrap();
+        r.admit(addr(3), "endif-B").unwrap();
+        r.assign(addr(1), "p1");
+        r.assign(addr(2), "p2");
+        r.assign(addr(3), "p3");
+        r.connect("p1");
+        r.connect("p3");
+        assert_eq!(r.playing(), 0, "one connected peer per room: nobody is playing yet");
+        r.connect("p2");
+        assert_eq!(r.playing(), 2);
+        r.disconnect("p1");
+        assert_eq!(r.playing(), 0);
     }
 
     #[test]

@@ -92,7 +92,7 @@ pub fn router(state: AppState) -> Router {
     let rest = Router::new()
         .route("/me", get(me))
         .route("/profile/{username}", get(profile))
-        .route("/queue", get(queue_stats))
+        .route("/stats", get(stats))
         .route("/queue/join", post(queue_join))
         .route("/queue/poll", post(queue_poll))
         .route("/queue/leave", post(queue_leave))
@@ -532,10 +532,11 @@ async fn profile(State(state): State<AppState>, Path(username): Path<String>) ->
 
 // ------------------------------------------------------------------------------------ matchmaking
 
-/// How many players are searching right now, for the main menu. No login needed.
-async fn queue_stats(State(state): State<AppState>) -> ApiResult {
+/// How many players are in a game and how many are searching, for the main menu. No login needed.
+async fn stats(State(state): State<AppState>) -> ApiResult {
+    let playing = state.rooms.lock().unwrap().playing();
     let waiting = state.queue.lock().unwrap().len();
-    Ok(Json(json!({ "waiting": waiting })))
+    Ok(Json(json!({ "playing": playing, "waiting": waiting })))
 }
 
 /// Enters the queue (or pairs with whoever is waiting). Poll `/queue/poll` with the ticket.
@@ -574,8 +575,9 @@ async fn queue_poll(State(state): State<AppState>, _user: AuthUser, Json(req): J
         let result = queue.poll(&req.ticket);
         (result, queue.len())
     };
+    let playing = state.rooms.lock().unwrap().playing();
     Ok(Json(match result {
-        PollResult::Waiting { position } => json!({ "status": "waiting", "position": position, "waiting": waiting }),
+        PollResult::Waiting { position } => json!({ "status": "waiting", "position": position, "waiting": waiting, "playing": playing }),
         PollResult::Matched(m) => json!({ "status": "matched", "match": m }),
         PollResult::Expired => json!({ "status": "expired" }),
     }))

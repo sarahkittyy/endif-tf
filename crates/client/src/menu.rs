@@ -3,7 +3,7 @@
 //! overlay (Esc) and the settings screen. Screens are described by the `UiScreen` resource; the UI
 //! is rebuilt whenever it changes. Styling comes from `theme` (TF2 fonts, palette and panels).
 
-use crate::account::{Account, Ending, HistoryEntry, Rating, RankedResult};
+use crate::account::{Account, Ending, HistoryEntry, Rating, RankedResult, Stats};
 use crate::config::{ClientConfig, ROOM_CODE_LEN, code_from_text, normalize_room_code};
 use crate::loading::StartupDone;
 use crate::net::{LOBBY_TIMEOUT_MINUTES, MatchKind, NetCommand, RoomConnection, RoomFailure, SignalingStatus};
@@ -212,13 +212,13 @@ struct ConnectingText;
 #[derive(Component)]
 struct QueueText;
 
-/// The "N in queue" line under it.
+/// The "N playing, M in queue" line under it.
 #[derive(Component)]
 struct QueueSizeText;
 
-/// The "(N searching)" label beside the main menu's "Find game" button.
+/// The "(N playing)" label inside the main menu's "Find game" button.
 #[derive(Component)]
-struct SearchingText;
+struct PlayingText;
 
 /// Slider parts.
 #[derive(Component)]
@@ -285,7 +285,7 @@ impl Plugin for MenuPlugin {
                     sync_settings_widgets,
                     disabled_tooltips,
                     queue_status,
-                    searching_count,
+                    playing_count,
                     resend_timer,
                 )
                     .chain(),
@@ -616,10 +616,10 @@ fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: 
     e.id()
 }
 
-/// "(N searching)" beside "Find game", or nothing while the count is unknown.
-fn searching_label(searching: Option<usize>) -> String {
-    match searching {
-        Some(n) => format!("({n} searching)"),
+/// "(N playing)" inside "Find game", or nothing while the count is unknown.
+fn playing_label(stats: Option<Stats>) -> String {
+    match stats {
+        Some(s) => format!("({} playing)", s.playing),
         None => String::new(),
     }
 }
@@ -699,12 +699,12 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
 
         p.spawn(panel_column(18.0)).with_children(|c| {
             let find = online_button(c, theme, "Find game", UiAction::FindGame, ranked_offline);
-            // Hangs off the button's right edge so the button itself stays centred in the column.
+            // A second, smaller text inside the button, right after the label.
             c.commands().entity(find).with_child((
-                SearchingText,
-                theme.label(searching_label(account.searching), 13.0, theme::TAN_LIGHT),
+                PlayingText,
+                theme.heading_flat(playing_label(account.stats), 12.0, theme::BTN_TEXT),
                 no_wrap(),
-                Node { position_type: PositionType::Absolute, left: Val::Percent(100.0), margin: UiRect::left(Val::Px(10.0)), ..default() },
+                Node { margin: UiRect::left(Val::Px(8.0)), ..default() },
             ));
             c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
             online_button(c, theme, "Create private room", UiAction::CreateRoom, offline);
@@ -1195,7 +1195,7 @@ fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account) {
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(26.0)).with_children(|c| {
             c.spawn(theme.heading_flat("MATCHMAKING", 22.0, theme::ORANGE));
-            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), margin: UiRect::vertical(Val::Px(12.0)), ..default() })
+            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), margin: UiRect::top(Val::Px(12.0)), ..default() })
                 .with_children(|r| {
                     r.spawn(theme.soldier_icon(32.0));
                     r.spawn((QueueText, theme.heading_flat("SEARCHING FOR A GAME...", 18.0, theme::TAN_LIGHT), no_wrap()));
@@ -1203,7 +1203,7 @@ fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account) {
             c.spawn((
                 QueueSizeText,
                 theme.label(queue_size_label(account), 13.0, theme::TAN_LIGHT),
-                Node { margin: UiRect::bottom(Val::Px(4.0)), ..default() },
+                Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() },
             ));
             c.spawn((
                 theme.label(format!("playing as {} ({} ELO)", account.display_name(), account.user.as_ref().map(|u| u.elo).unwrap_or(0)), 13.0, theme::OFF_WHITE),
@@ -1230,10 +1230,10 @@ fn spawn_download(commands: &mut Commands, theme: &Theme) {
     });
 }
 
-/// "N in queue" (us included), or nothing until the server has said.
+/// "N playing, M in queue" (us included), or nothing until the server has said.
 fn queue_size_label(account: &Account) -> String {
     match &account.queue {
-        Some(q) if q.waiting > 0 => format!("{} in queue", q.waiting),
+        Some(q) if q.waiting > 0 => format!("{} playing, {} in queue", q.playing, q.waiting),
         _ => String::new(),
     }
 }
@@ -1266,13 +1266,13 @@ fn queue_status(
     }
 }
 
-/// Keeps the main menu's "(N searching)" label current without rebuilding the screen.
-fn searching_count(account: Res<Account>, mut text: Query<&mut Text, With<SearchingText>>) {
+/// Keeps the main menu's "(N playing)" label current without rebuilding the screen.
+fn playing_count(account: Res<Account>, mut text: Query<&mut Text, With<PlayingText>>) {
     if !account.is_changed() {
         return;
     }
     let Ok(mut t) = text.single_mut() else { return };
-    let want = searching_label(account.searching);
+    let want = playing_label(account.stats);
     if t.0 != want {
         t.0 = want;
     }

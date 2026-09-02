@@ -24,8 +24,8 @@ pub const NAME_MAX: usize = 20;
 const STORE: &str = "account.json";
 /// How often the queue is polled.
 const QUEUE_POLL_SECS: f64 = 1.5;
-/// How often the main menu asks how many players are searching.
-const SEARCHING_POLL_SECS: f64 = 5.0;
+/// How often the main menu asks how many players are playing and searching.
+const STATS_POLL_SECS: f64 = 5.0;
 /// How long the result banner stays up before a finished ranked match returns to the menu.
 const RANKED_EXIT_SECS: f64 = 4.0;
 /// How often the result popup asks the server whether the match has been settled.
@@ -116,8 +116,8 @@ pub enum Req {
     QueueJoin,
     QueuePoll,
     QueueLeave,
-    /// How many players are searching, for the main menu.
-    QueueCount,
+    /// How many players are playing and searching, for the main menu.
+    Stats,
     Report,
     /// A private-room round for the history.
     Casual,
@@ -128,7 +128,7 @@ pub enum Req {
 impl Req {
     /// Requests the forms wait on (buttons show "working...").
     fn blocks(self) -> bool {
-        !matches!(self, Req::Me | Req::QueuePoll | Req::QueueLeave | Req::QueueCount | Req::Report | Req::Casual | Req::MatchStatus)
+        !matches!(self, Req::Me | Req::QueuePoll | Req::QueueLeave | Req::Stats | Req::Report | Req::Casual | Req::MatchStatus)
     }
 }
 
@@ -145,7 +145,18 @@ pub struct QueueState {
     pub position: usize,
     /// Players in the queue, us included (0 until the server has answered).
     pub waiting: usize,
+    /// Players in a game, as of the last poll.
+    pub playing: usize,
     pub since: f64,
+}
+
+/// Server-wide activity, for the main menu.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct Stats {
+    /// Players in a game right now.
+    pub playing: usize,
+    /// Players searching for a match.
+    pub waiting: usize,
 }
 
 /// How a ranked match ended, from this player's side.
@@ -196,11 +207,11 @@ pub struct Account {
     pub error: Option<String>,
     pub notice: Option<String>,
     pub queue: Option<QueueState>,
-    /// Players searching for a match right now, as last reported; `None` until the server has
+    /// Who is playing and searching right now, as last reported; `None` until the server has
     /// answered (or after it stopped answering).
-    pub searching: Option<usize>,
-    /// Menu time of the next `/queue` count request.
-    next_searching_poll: f64,
+    pub stats: Option<Stats>,
+    /// Menu time of the next `/stats` request.
+    next_stats_poll: f64,
     /// The ranked match that just ended, until its popup is dismissed.
     pub result: Option<RankedResult>,
     requests: Vec<Pending>,
@@ -232,8 +243,8 @@ impl Account {
             error: None,
             notice: None,
             queue: None,
-            searching: None,
-            next_searching_poll: 0.0,
+            stats: None,
+            next_stats_poll: 0.0,
             result: None,
             requests: Vec::new(),
         }
@@ -361,7 +372,7 @@ impl Account {
     }
 
     pub fn join_queue(&mut self, cfg: &ClientConfig, now: f64) {
-        self.queue = Some(QueueState { ticket: None, next_poll: now, position: 0, waiting: 0, since: now });
+        self.queue = Some(QueueState { ticket: None, next_poll: now, position: 0, waiting: 0, playing: 0, since: now });
         self.call(cfg, Req::QueueJoin, "/queue/join", Some(json!({})));
     }
 
@@ -377,10 +388,10 @@ impl Account {
         self.call(cfg, Req::QueuePoll, "/queue/poll", Some(json!({ "ticket": ticket })));
     }
 
-    /// Asks how many players are searching (the main menu's "(N searching)").
-    fn fetch_searching(&mut self, cfg: &ClientConfig) {
-        if !self.in_flight(Req::QueueCount) {
-            self.call(cfg, Req::QueueCount, "/queue", None);
+    /// Asks how many players are playing and searching (the main menu's "(N playing)").
+    fn fetch_stats(&mut self, cfg: &ClientConfig) {
+        if !self.in_flight(Req::Stats) {
+            self.call(cfg, Req::Stats, "/stats", None);
         }
     }
 
@@ -432,7 +443,7 @@ impl Plugin for AccountPlugin {
                 (
                     poll_requests,
                     queue_tick.run_if(in_state(AppState::Menu)),
-                    searching_tick.run_if(in_state(AppState::Menu)),
+                    stats_tick.run_if(in_state(AppState::Menu)),
                     result_poll.run_if(in_state(AppState::Menu)),
                     sync_anon_name.run_if(in_state(AppState::Menu)),
                 )
@@ -506,8 +517,8 @@ fn poll_requests(
         // on its own); rebuilding the screen for it flashes the backdrop. A match or a refusal
         // switches screens, which rebuilds anyway. The result popup's poll refreshes only once
         // the answer changes what it shows.
-        // The searching count is a label that updates in place.
-        if !matches!(kind, Req::QueuePoll | Req::MatchStatus | Req::QueueCount) {
+        // The activity count is a label that updates in place.
+        if !matches!(kind, Req::QueuePoll | Req::MatchStatus | Req::Stats) {
             refresh.0 = true;
         }
         match (kind, outcome(result)) {
@@ -592,6 +603,7 @@ fn poll_requests(
                     if let Some(q) = account.queue.as_mut() {
                         q.position = v["position"].as_u64().unwrap_or(0) as usize;
                         q.waiting = v["waiting"].as_u64().unwrap_or(0) as usize;
+                        q.playing = v["playing"].as_u64().unwrap_or(0) as usize;
                     }
                 }
                 _ => {
@@ -611,8 +623,8 @@ fn poll_requests(
                     *screen = UiScreen::Main;
                 }
             }
-            (Req::QueueCount, Ok(v)) => account.searching = v["waiting"].as_u64().map(|n| n as usize),
-            (Req::QueueCount, Err(_)) => account.searching = None,
+            (Req::Stats, Ok(v)) => account.stats = serde_json::from_value(v).ok(),
+            (Req::Stats, Err(_)) => account.stats = None,
             (Req::QueueLeave | Req::Report | Req::Casual, Ok(_)) => {}
             (Req::Report, Err((msg, _))) => warn!("result report refused: {msg}"),
             (Req::Casual, Err((msg, _))) => warn!("casual round not recorded: {msg}"),
@@ -663,17 +675,17 @@ fn queue_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, cfg: Res<Clie
     }
 }
 
-/// Keeps the main menu's count of searching players current while it is up and the server answers.
-fn searching_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, status: Res<SignalingStatus>, cfg: Res<ClientConfig>, time: Res<Time<Real>>) {
+/// Keeps the main menu's activity count current while it is up and the server answers.
+fn stats_tick(mut account: ResMut<Account>, screen: Res<UiScreen>, status: Res<SignalingStatus>, cfg: Res<ClientConfig>, time: Res<Time<Real>>) {
     if *screen != UiScreen::Main || status.state != SignalState::Up {
         return;
     }
     let now = time.elapsed_secs_f64();
-    if now < account.next_searching_poll {
+    if now < account.next_stats_poll {
         return;
     }
-    account.next_searching_poll = now + SEARCHING_POLL_SECS;
-    account.fetch_searching(&cfg);
+    account.next_stats_poll = now + STATS_POLL_SECS;
+    account.fetch_stats(&cfg);
 }
 
 /// The anonymous name box saves as it is typed.
