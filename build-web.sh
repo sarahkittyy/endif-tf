@@ -103,11 +103,13 @@ WEBGL2_BYTES=$(wasm_bytes webgl2)
 sed -i.bak "s/__WASM_BYTES_WEBGPU__/$WEBGPU_BYTES/; s/__WASM_BYTES_WEBGL2__/$WEBGL2_BYTES/" "$STAGE/index.html"
 sed -i.bak "s|__ASSET_DIR__|$ENDIF_ASSET_DIR|g" "$STAGE/index.html"
 sed -i.bak "s|__SIGNALING__|${ENDIF_SIGNALING:-}|" "$STAGE/index.html"
-BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || true)-$(date +%s)"
+# Cache buster on the script and wasm URLs: unique per build, committed or not.
+CACHE_BUST="$(git rev-parse --short HEAD 2>/dev/null || true)-$(date +%s)"
+sed -i.bak "s|__CACHE_BUST__|$CACHE_BUST|g" "$STAGE/index.html"
+# The page compares itself to the server's /build before downloading the wasm (index.html); the
+# same value the wasm carries as endif_sim::BUILD_ID.
+BUILD_ID="$(cargo run -q --release -p endif-sim --bin build-id)"
 sed -i.bak "s|__BUILD_ID__|$BUILD_ID|g" "$STAGE/index.html"
-# The page compares itself to the server's /version before downloading the wasm (index.html).
-PROTOCOL_ID="$(cargo run -q --release -p endif-sim --bin protocol-id)"
-sed -i.bak "s|__PROTOCOL_ID__|$PROTOCOL_ID|g" "$STAGE/index.html"
 rm -f "$STAGE/index.html.bak"
 
 if [ ! -d "dist/$ENDIF_ASSET_DIR" ]; then

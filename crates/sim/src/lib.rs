@@ -6,9 +6,14 @@
 /// simulation, different as soon as the simulation changes.
 pub const SIM_HASH: &str = env!("ENDIF_SIM_HASH");
 
+/// The commit this was built from (see `build.rs`; `dev` outside git). Changes with every push,
+/// so a client can tell that a newer build exists even when the simulation, and therefore
+/// [`protocol_id`], has not changed. The server reports it on `GET /build`.
+pub const BUILD_ID: &str = env!("ENDIF_BUILD_ID");
+
 /// Bump when the netcode changes in a way the simulation hash cannot see: the GGRS settings
 /// (frame rate, input delay, prediction window), the input serialisation, the room protocol.
-pub const NET_PROTOCOL: u32 = 2;
+pub const NET_PROTOCOL: u32 = 3;
 
 /// The identity two peers must share to play together; checked by the signaling server.
 pub fn protocol_id() -> String {

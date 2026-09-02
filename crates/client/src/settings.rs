@@ -23,8 +23,15 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 7] =
-        [Action::Forward, Action::Back, Action::Left, Action::Right, Action::Jump, Action::Crouch, Action::Fire];
+    pub const ALL: [Action; 7] = [
+        Action::Forward,
+        Action::Back,
+        Action::Left,
+        Action::Right,
+        Action::Jump,
+        Action::Crouch,
+        Action::Fire,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -117,7 +124,9 @@ impl Binding {
     fn from_ini(s: &str) -> Option<Binding> {
         if let Some(k) = s.strip_prefix("key:") {
             // KeyCode's serde form is its Debug name as a JSON string.
-            return serde_json::from_str::<KeyCode>(&format!("\"{k}\"")).ok().map(Binding::Key);
+            return serde_json::from_str::<KeyCode>(&format!("\"{k}\""))
+                .ok()
+                .map(Binding::Key);
         }
         let m = s.strip_prefix("mouse:")?;
         Some(Binding::Mouse(match m {
@@ -153,7 +162,11 @@ impl Default for Bindings {
             // TF2's Ctrl on desktop. In a browser Ctrl+W (crouch while running forward) closes the
             // tab and a page cannot cancel it, so the web build starts on Shift; Ctrl stays
             // bindable, with a warning in the settings.
-            crouch: Binding::Key(if cfg!(target_arch = "wasm32") { KeyCode::ShiftLeft } else { KeyCode::ControlLeft }),
+            crouch: Binding::Key(if cfg!(target_arch = "wasm32") {
+                KeyCode::ShiftLeft
+            } else {
+                KeyCode::ControlLeft
+            }),
             fire: Binding::Mouse(MouseButton::Left),
         }
     }
@@ -184,7 +197,12 @@ impl Bindings {
         }
     }
 
-    pub fn pressed(&self, a: Action, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+    pub fn pressed(
+        &self,
+        a: Action,
+        keys: &ButtonInput<KeyCode>,
+        mouse: &ButtonInput<MouseButton>,
+    ) -> bool {
         self.get(a).pressed(keys, mouse)
     }
 }
@@ -285,7 +303,7 @@ impl Default for Settings {
             sensitivity_y: 2.5,
             separate_sensitivity: false,
             invert_y: false,
-            volume: 0.75,
+            volume: 0.50,
             fullscreen: false,
             bindings: Bindings::default(),
         }
@@ -353,12 +371,19 @@ impl Settings {
         let mut out = String::from("; endif.tf settings\n[mouse]\n");
         out.push_str(&format!("sensitivity_x = {:.2}\n", self.sensitivity_x));
         out.push_str(&format!("sensitivity_y = {:.2}\n", self.sensitivity_y));
-        out.push_str(&format!("separate_sensitivity = {}\n", self.separate_sensitivity));
+        out.push_str(&format!(
+            "separate_sensitivity = {}\n",
+            self.separate_sensitivity
+        ));
         out.push_str(&format!("invert_y = {}\n\n[audio]\n", self.invert_y));
         out.push_str(&format!("volume = {:.2}\n\n[video]\n", self.volume));
         out.push_str(&format!("fullscreen = {}\n\n[keys]\n", self.fullscreen));
         for a in Action::ALL {
-            out.push_str(&format!("{} = {}\n", a.ini_key(), self.bindings.get(a).to_ini()));
+            out.push_str(&format!(
+                "{} = {}\n",
+                a.ini_key(),
+                self.bindings.get(a).to_ini()
+            ));
         }
         out
     }
@@ -371,10 +396,16 @@ impl Settings {
         let mut separate = false;
         for line in text.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with(';') || line.starts_with('#') || line.starts_with('[') {
+            if line.is_empty()
+                || line.starts_with(';')
+                || line.starts_with('#')
+                || line.starts_with('[')
+            {
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let (k, v) = (k.trim(), v.trim());
             match k {
                 "sensitivity_x" => {
@@ -434,7 +465,10 @@ pub mod storage {
     }
 
     pub fn read(name: &str) -> Option<String> {
-        [exe_path(name), config_path(name)].into_iter().flatten().find_map(|p| std::fs::read_to_string(p).ok())
+        [exe_path(name), config_path(name)]
+            .into_iter()
+            .flatten()
+            .find_map(|p| std::fs::read_to_string(p).ok())
     }
 
     pub fn write(name: &str, text: &str) -> Result<(), String> {
@@ -466,7 +500,10 @@ pub mod storage {
     }
 
     pub fn write(name: &str, text: &str) -> Result<(), String> {
-        storage().ok_or("localStorage unavailable")?.set_item(&key(name), text).map_err(|_| "localStorage write failed".to_string())
+        storage()
+            .ok_or("localStorage unavailable")?
+            .set_item(&key(name), text)
+            .map_err(|_| "localStorage write failed".to_string())
     }
 }
 

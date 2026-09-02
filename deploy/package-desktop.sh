@@ -11,11 +11,13 @@ case "$platform" in
     cargo build --release -p endif-client -p endif-updater
     cp target/release/endif-client.exe "$stage/endif.exe"
     cp target/release/endif-updater.exe "$stage/endif-updater.exe"
+    exe="$stage/endif.exe"
     ;;
   linux)
     cargo build --release -p endif-client -p endif-updater
     cp target/release/endif-client "$stage/endif"
     cp target/release/endif-updater "$stage/endif-updater"
+    exe="$stage/endif"
     ;;
   *)
     echo "usage: $0 windows|linux" >&2
@@ -23,6 +25,9 @@ case "$platform" in
     ;;
 esac
 
+# The package's build id, published next to it as /download/<platform>.version: the game waits
+# for it to match the server's before offering the update (the packages go up minutes later).
+printf '%s\n' "$("$exe" --build-id | tr -d '\r')" > "out/endif-$platform.version"
 cp -r crates/client/assets "$stage/assets"
 cat > "$stage/README.txt" <<'TXT'
 endif.tf - desktop build

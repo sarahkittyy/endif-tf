@@ -3,14 +3,15 @@
 //! The game starts it (`crates/client/src/update.rs`) and quits:
 //!
 //! ```text
-//! endif-updater --dir <install dir> --url <archive url> --launch <game exe> [--wait-pid <pid>] [--expect <protocol id>]
+//! endif-updater --dir <install dir> --url <archive url> --launch <game exe> [--wait-pid <pid>] [--expect <build id>]
 //! ```
 //!
 //! Steps, in order: move itself out of the install directory (a running exe cannot be replaced on
 //! Windows, and it ships inside the archive); download the archive next to the install; wait for
 //! the game to exit; unpack into a staging directory; with `--expect`, ask the staged game for its
-//! protocol id and refuse a download that is still the previous build (the site publishes the
-//! desktop packages a few minutes after the server); move the staged files over the install;
+//! build id and refuse a download that is still the previous build (the site publishes the
+//! desktop packages a few minutes after the server; the game normally waits for them, this is
+//! the backstop); move the staged files over the install;
 //! relaunch the game. Nothing in the install is touched before the staged build has been checked,
 //! so a failed download or unpack leaves the old version runnable, and the game is relaunched
 //! either way.
@@ -72,7 +73,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("endif-updater: {e}");
-            eprintln!("usage: endif-updater --dir <install dir> --url <archive url> --launch <game exe> [--wait-pid <pid>] [--expect <protocol id>]");
+            eprintln!("usage: endif-updater --dir <install dir> --url <archive url> --launch <game exe> [--wait-pid <pid>] [--expect <build id>]");
             pause();
             std::process::exit(2);
         }
@@ -171,10 +172,10 @@ fn update(args: &Args, archive: &Path, stage: &Path) -> Result<(), String> {
         return Err(format!("the archive holds no {}", exe_name.to_string_lossy()));
     }
     if let Some(expect) = &args.expect {
-        let got = protocol_of(&staged_exe)?;
+        let got = build_of(&staged_exe)?;
         if got != *expect {
             return Err(format!(
-                "the download is still the previous build (its protocol is {got}, the server's is {expect}). \
+                "the download is still the previous build (its build is {got}, the server's is {expect}). \
                  The desktop packages go up a few minutes after the server; try again shortly."
             ));
         }
@@ -279,16 +280,16 @@ fn staged_root(stage: &Path) -> PathBuf {
 }
 
 /// Asks a game executable which protocol it speaks (`endif --protocol` prints it and exits).
-fn protocol_of(exe: &Path) -> Result<String, String> {
+fn build_of(exe: &Path) -> Result<String, String> {
     let out = Command::new(exe)
-        .arg("--protocol")
+        .arg("--build-id")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .map_err(|e| format!("run {} --protocol: {e}", exe.display()))?;
+        .map_err(|e| format!("run {} --build-id: {e}", exe.display()))?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || s.is_empty() {
-        return Err(format!("{} --protocol gave no answer (exit {})", exe.display(), out.status));
+        return Err(format!("{} --build-id gave no answer (exit {})", exe.display(), out.status));
     }
     Ok(s)
 }

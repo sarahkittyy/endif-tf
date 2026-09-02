@@ -343,11 +343,12 @@ fn update_hud(
     if let Ok(mut t) = texts.p4().single_mut() {
         let focus = if captured.0 { "Tab to unfocus" } else { "click to focus" };
         let net = match kind.as_deref() {
-            // Only warnings are shown ("connection interrupted", "desync ..."), never "connected".
-            Some(MatchKind::Room { .. } | MatchKind::Quick(_)) if status.text != "connected" && !status.text.is_empty() => {
+            // Every online match (private, quick play, competitive) shows the ping; only warnings
+            // are shown next to it ("connection interrupted", "desync ..."), never "connected".
+            Some(MatchKind::Room { .. } | MatchKind::Quick(_) | MatchKind::Ranked(_)) if status.text != "connected" && !status.text.is_empty() => {
                 format!("\nping {} ms - {}", status.ping_ms, status.text)
             }
-            Some(MatchKind::Room { .. } | MatchKind::Quick(_)) => format!("\nping {} ms", status.ping_ms),
+            Some(MatchKind::Room { .. } | MatchKind::Quick(_) | MatchKind::Ranked(_)) => format!("\nping {} ms", status.ping_ms),
             _ => String::new(),
         };
         t.0 = format!("{focus} - Esc for menu{net}");

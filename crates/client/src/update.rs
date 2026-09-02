@@ -8,8 +8,9 @@ use std::process::Command;
 
 const UPDATER: &str = if cfg!(windows) { "endif-updater.exe" } else { "endif-updater" };
 
-/// Starts the updater. The caller exits the app on `Ok`.
-pub fn launch_updater(cfg: &ClientConfig, server_version: &str) -> Result<(), String> {
+/// Starts the updater. `server_build` is the build id the server reports: the updater refuses a
+/// package that is still an older build. The caller exits the app on `Ok`.
+pub fn launch_updater(cfg: &ClientConfig, server_build: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find the game executable: {e}"))?;
     let dir = exe.parent().ok_or("the game executable has no directory")?.to_path_buf();
     let updater = dir.join(UPDATER);
@@ -26,8 +27,8 @@ pub fn launch_updater(cfg: &ClientConfig, server_version: &str) -> Result<(), St
         .arg(&exe)
         .arg("--wait-pid")
         .arg(std::process::id().to_string());
-    if !server_version.is_empty() {
-        cmd.arg("--expect").arg(server_version);
+    if !server_build.is_empty() {
+        cmd.arg("--expect").arg(server_build);
     }
     cmd.spawn().map_err(|e| format!("could not start the updater: {e}"))?;
     Ok(())

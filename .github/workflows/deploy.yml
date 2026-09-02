@@ -4,8 +4,13 @@
 #              build endif-server and the web client, publish dist/, restart the server.
 #   desktop    on GitHub's hosted runners: release builds for Windows and Linux, packaged by
 #              deploy/package-desktop.sh and uploaded as artifacts.
-#   downloads  back on sarahvps2: copies those packages to /srv/endif/download, which nginx serves
-#              as https://endif.tf/download/{windows,linux}.
+#   downloads  back on sarahvps2: copies those packages (and the .version file naming the build
+#              each one is) to /srv/endif/download, which nginx serves as
+#              https://endif.tf/download/{windows,linux}[.version].
+#
+# The server goes live as soon as its own job is done; the desktop packages follow when the slower
+# hosted builds finish. Web clients reload for the new build at once; desktop clients see the update
+# but wait for their package's .version to match the server before downloading it.
 #
 # The nginx site and the supervisord program are installed once by hand and the workflow never
 # touches them (deploy/nginx and deploy/supervisor are gitignored local copies of what is on the
@@ -73,7 +78,7 @@ jobs:
         run: |
           for i in 1 2 3 4 5 6 7 8 9 10; do
             if curl -fsS https://endif.tf/health >/dev/null; then
-              echo "server: $(curl -fsS https://endif.tf/version)"
+              echo "server: protocol $(curl -fsS https://endif.tf/version), build $(curl -fsS https://endif.tf/build)"
               exit 0
             fi
             sleep 3
@@ -116,6 +121,10 @@ jobs:
 
       - name: Build and package
         shell: bash
+        # CARGO_LOG: the restored cache has been ignored (a full rebuild of Bevy after a cache
+        # hit); cargo says per crate why it considers it dirty. Remove once the cause is found.
+        env:
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
         run: bash deploy/package-desktop.sh ${{ matrix.name }}
 
       - uses: actions/upload-artifact@v4

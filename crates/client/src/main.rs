@@ -52,12 +52,21 @@ const ASSET_DIR: &str = match option_env!("ENDIF_ASSET_DIR") {
 };
 
 fn main() {
-    // `endif --protocol` prints the protocol identity and exits: the updater asks a freshly
-    // downloaded build this before installing it.
+    // `endif --build-id` prints the build identity (the commit) and exits: the updater asks a
+    // freshly downloaded build this before installing it, and `deploy/package-desktop.sh` writes
+    // it next to the package. `--protocol` (the simulation identity) is what updaters shipped
+    // before the build id existed ask; keep answering it.
     #[cfg(not(target_arch = "wasm32"))]
-    if std::env::args().any(|a| a == "--protocol") {
-        println!("{}", endif_sim::protocol_id());
-        return;
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--build-id") {
+            println!("{}", endif_sim::BUILD_ID);
+            return;
+        }
+        if args.iter().any(|a| a == "--protocol") {
+            println!("{}", endif_sim::protocol_id());
+            return;
+        }
     }
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();

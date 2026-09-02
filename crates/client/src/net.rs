@@ -81,7 +81,8 @@ pub type LoopResult = Arc<Mutex<Option<Result<(), String>>>>;
 
 /// Result of a background HTTP request (`ehttp`: a thread on desktop, `fetch` in the browser):
 /// status and body, or a transport error. `None` while in flight.
-pub type HttpSlot = Arc<Mutex<Option<Result<(u16, Vec<u8>), String>>>>;
+pub type HttpResult = Result<(u16, Vec<u8>), String>;
+pub type HttpSlot = Arc<Mutex<Option<HttpResult>>>;
 
 fn http_get(url: &str) -> HttpSlot {
     let slot: HttpSlot = Arc::new(Mutex::new(None));
@@ -167,15 +168,36 @@ pub enum SignalState {
     Outdated,
 }
 
-/// The menu's view of the matchmaking server, kept current by polling `GET /version`: the UI
-/// greys out online play while it is unreachable and tells a stale build to update.
+/// Desktop: what `/download/<platform>.version` said about the package on the site.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum PackageBuild {
+    /// Not asked yet, or the answer is still on its way.
+    #[default]
+    Unknown,
+    /// The site does not publish one (a bare server without nginx in front): the updater has to
+    /// find out by downloading.
+    Unavailable,
+    Known(String),
+}
+
+/// The menu's view of the matchmaking server, kept current by polling `GET /version` and
+/// `GET /build`: the UI greys out online play while it is unreachable or this build's protocol is
+/// stale, and offers an update as soon as the server runs a newer build at all.
 #[derive(Resource, Default)]
 pub struct SignalingStatus {
     pub state: SignalState,
-    /// The protocol id the server last reported (the version an update must reach).
+    /// The protocol id the server last reported.
     pub server_version: Option<String>,
-    /// The `/version` request in flight and when it was sent.
-    probe: Option<(HttpSlot, f64)>,
+    /// The build id the server last reported (the version an update must reach); `None` from a
+    /// server that predates `/build`.
+    pub server_build: Option<String>,
+    /// Desktop: the build of the package on the site, asked for while an update is pending.
+    pub package_build: PackageBuild,
+    /// The `/version` and `/build` requests in flight and when they were sent.
+    probe: Option<(HttpSlot, HttpSlot, f64)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    package_probe: Option<(HttpSlot, f64)>,
     next_probe_at: f64,
 }
 
@@ -184,12 +206,116 @@ impl SignalingStatus {
     pub fn is_down(&self) -> bool {
         matches!(self.state, SignalState::Down | SignalState::Outdated)
     }
+    /// The server runs a different protocol: it will refuse this build.
     pub fn is_outdated(&self) -> bool {
         self.state == SignalState::Outdated
     }
+    /// The server runs a newer build than this one. Without a protocol change this build can
+    /// still play; the menu offers the update either way.
+    pub fn update_available(&self) -> bool {
+        self.is_outdated() || self.server_build.as_deref().is_some_and(|b| b != endif_sim::BUILD_ID)
+    }
+    /// Desktop: the package on the site is the server's build, so the updater will get it (or the
+    /// site does not say, and the updater checks what it downloaded). The packages go up a few
+    /// minutes after the server, so this lags `update_available`.
+    pub fn package_ready(&self) -> bool {
+        match &self.package_build {
+            PackageBuild::Known(p) => Some(p) == self.server_build.as_ref(),
+            PackageBuild::Unavailable => true,
+            PackageBuild::Unknown => false,
+        }
+    }
+    /// Everything the menu draws differently; a change means a redraw.
+    fn ui_key(&self) -> (SignalState, bool, bool) {
+        (self.state, self.update_available(), self.package_ready())
+    }
+    /// Forgets the requests in flight (entering a match: the answers are not wanted any more).
+    fn cancel(&mut self) {
+        self.probe = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.package_probe = None;
+        }
+    }
+
+    /// Both probe answers are in: records what the server reported and returns the new state.
+    /// `may_reload` allows the web page to fetch a newer build straight away (only from the main
+    /// menu: a reload from a lobby would lose the room).
+    fn settle(&mut self, version: HttpResult, build: HttpResult, may_reload: bool) -> SignalState {
+        let version = match version {
+            Ok((200, body)) => String::from_utf8_lossy(&body).trim().to_string(),
+            Ok((code, _)) => {
+                warn!("version probe answered HTTP {code}");
+                return SignalState::Down;
+            }
+            Err(e) => {
+                warn!("version probe failed: {e}");
+                return SignalState::Down;
+            }
+        };
+        self.server_version = Some(version.clone());
+        self.server_build = match build {
+            Ok((200, body)) => Some(String::from_utf8_lossy(&body).trim().to_string()),
+            // A server from before `/build` existed: the protocol is all there is to go on.
+            Ok((code, _)) => {
+                info!("build probe answered HTTP {code}");
+                None
+            }
+            Err(e) => {
+                warn!("build probe failed: {e}");
+                None
+            }
+        };
+        let outdated = version != endif_sim::protocol_id();
+        let newer = self.server_build.as_deref().is_some_and(|b| b != endif_sim::BUILD_ID);
+        if outdated {
+            warn!("server protocol {version} != ours {}: this build is out of date", endif_sim::protocol_id());
+        } else if newer {
+            info!("server build {} != ours {}: a newer build is available", self.server_build.as_deref().unwrap_or_default(), endif_sim::BUILD_ID);
+        }
+        if outdated || (newer && may_reload) {
+            // Web: the page is stale; one reload per server build fetches the current one, so a
+            // page that is still stale afterwards (deploy in progress) does not loop. No-op on desktop.
+            let key = self.server_build.clone().unwrap_or(version);
+            if crate::webclip::reload_for_update(Some(&key)) {
+                info!("reloading the page for the current build");
+            }
+        }
+        if outdated { SignalState::Outdated } else { SignalState::Up }
+    }
+
+    /// Desktop: takes the answer to the package version request, if it is in.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_package(&mut self, now: f64) {
+        let (answer, started) = match &self.package_probe {
+            Some((slot, started)) => (slot.lock().unwrap().clone(), *started),
+            None => return,
+        };
+        let build = match answer {
+            Some(Ok((200, body))) => PackageBuild::Known(String::from_utf8_lossy(&body).trim().to_string()),
+            Some(Ok((code, _))) => {
+                info!("package version answered HTTP {code}");
+                PackageBuild::Unavailable
+            }
+            Some(Err(e)) => {
+                warn!("package version failed: {e}");
+                PackageBuild::Unavailable
+            }
+            None if now - started > PROBE_TIMEOUT => {
+                warn!("package version timed out");
+                PackageBuild::Unavailable
+            }
+            None => return,
+        };
+        self.package_probe = None;
+        if build != self.package_build {
+            info!("desktop package on the site: {build:?}");
+            self.package_build = build;
+        }
+    }
 }
 
-/// How long a `/version` or `/api/room` request may take before the server counts as unreachable.
+/// How long a `/version`, `/build` or `/api/room` request may take before the server counts as unreachable.
 const PROBE_TIMEOUT: f64 = 8.0;
 /// Pause between probes while the server answers.
 const PROBE_INTERVAL: f64 = 15.0;
@@ -275,7 +401,7 @@ impl Plugin for NetPlugin {
             .add_systems(Update, probe_signaling.run_if(in_state(AppState::Menu).or_else(in_state(AppState::Connecting))))
             .add_systems(OnEnter(AppState::Menu), |mut s: ResMut<SignalingStatus>| s.next_probe_at = 0.0)
             .add_systems(OnEnter(AppState::InGame), |mut s: ResMut<SignalingStatus>, mut e: ResMut<MatchExit>| {
-                s.probe = None;
+                s.cancel();
                 *e = MatchExit::default();
             })
             .add_systems(Update, poll_room.run_if(in_state(AppState::Connecting)))
@@ -345,48 +471,31 @@ fn keep_presence(mut presence: ResMut<Presence>, status: Res<SignalingStatus>, c
     presence.retry_at = now + PRESENCE_RETRY;
 }
 
-/// Polls `GET /version` while in the menus: the server's protocol identity means it is up (and
-/// tells a stale build from a current one); an error, another status or no answer within
-/// `PROBE_TIMEOUT` means it is down, in which case the next probe comes sooner.
+/// Polls `GET /version` and `GET /build` together while in the menus: the protocol identity
+/// means the server is up (and tells a stale simulation from a current one); the build identity
+/// tells whether a newer build exists at all. An error, another status or no answer within
+/// `PROBE_TIMEOUT` means it is down, in which case the next probe comes sooner. Desktop: while an
+/// update is pending, also asks the site which build its package is.
 fn probe_signaling(
     mut status: ResMut<SignalingStatus>,
     cfg: Res<ClientConfig>,
     time: Res<Time<Real>>,
+    state: Res<State<AppState>>,
     mut refresh: ResMut<UiRefresh>,
 ) {
     let now = time.elapsed_secs_f64();
-    let in_flight = status.probe.as_ref().map(|(slot, started)| (slot.lock().unwrap().clone(), *started));
+    let before = status.ui_key();
+    let in_flight = status.probe.as_ref().map(|(v, b, started)| (v.lock().unwrap().clone(), b.lock().unwrap().clone(), *started));
     let new_state = match in_flight {
-        Some((Some(Ok((200, body))), _)) => {
-            let version = String::from_utf8_lossy(&body).trim().to_string();
-            status.server_version = Some(version.clone());
-            if version == endif_sim::protocol_id() {
-                Some(SignalState::Up)
-            } else {
-                warn!("server protocol {version} != ours {}: this build is out of date", endif_sim::protocol_id());
-                // Web: the page is stale; one reload fetches the current build (no-op on desktop).
-                if crate::webclip::reload_for_update(Some(&version)) {
-                    info!("reloading the page for the current build");
-                }
-                Some(SignalState::Outdated)
-            }
-        }
-        Some((Some(Ok((code, _))), _)) => {
-            warn!("version probe answered HTTP {code}");
-            Some(SignalState::Down)
-        }
-        Some((Some(Err(e)), _)) => {
-            warn!("version probe failed: {e}");
-            Some(SignalState::Down)
-        }
-        Some((None, started)) if now - started > PROBE_TIMEOUT => {
+        Some((Some(version), Some(build), _)) => Some(status.settle(version, build, *state.get() == AppState::Menu)),
+        Some((_, _, started)) if now - started > PROBE_TIMEOUT => {
             warn!("version probe timed out");
             Some(SignalState::Down)
         }
-        Some((None, _)) => None,
+        Some(_) => None,
         None => {
             if now >= status.next_probe_at {
-                status.probe = Some((http_get(&cfg.version_url()), now));
+                status.probe = Some((http_get(&cfg.version_url()), http_get(&cfg.build_url()), now));
             }
             None
         }
@@ -397,8 +506,16 @@ fn probe_signaling(
         if s != status.state {
             info!("matchmaking server: {s:?}");
             status.state = s;
-            refresh.0 = true;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if status.update_available() && !status.package_ready() && status.package_probe.is_none() {
+            status.package_probe = Some((http_get(&cfg.package_version_url()), now));
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    status.poll_package(now);
+    if status.ui_key() != before {
+        refresh.0 = true;
     }
 }
 

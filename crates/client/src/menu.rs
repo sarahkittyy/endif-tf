@@ -5,14 +5,18 @@
 //! `UiScreen` resource; the UI is rebuilt whenever it changes. Styling comes from `theme` (TF2
 //! fonts, palette and panels).
 
-use crate::account::{Account, Ending, HistoryEntry, LeaderboardEntry, QueueKind, Rating, RankedResult, Stats};
+use crate::AppState;
+use crate::account::{
+    Account, Ending, HistoryEntry, LeaderboardEntry, QueueKind, RankedResult, Rating, Stats,
+};
 use crate::config::{ClientConfig, ROOM_CODE_LEN, code_from_text, normalize_room_code};
 use crate::loading::StartupDone;
-use crate::net::{LOBBY_TIMEOUT_MINUTES, MatchKind, NetCommand, RoomConnection, RoomFailure, SignalingStatus};
+use crate::net::{
+    LOBBY_TIMEOUT_MINUTES, MatchKind, NetCommand, RoomConnection, RoomFailure, SignalingStatus,
+};
 use crate::settings::{Action, Axis, Binding, Settings, Slider};
 use crate::textfield::{Field, Form, spawn_field};
 use crate::theme::{self, Theme, code_display};
-use crate::AppState;
 use bevy::camera::ClearColorConfig;
 use bevy::clipboard::{Clipboard, ClipboardRead};
 use bevy::ecs::relationship::RelatedSpawnerCommands;
@@ -57,7 +61,10 @@ pub enum UiScreen {
 impl UiScreen {
     /// True while an in-game overlay is open (mouse released, game input ignored).
     pub fn blocks_game_input(self) -> bool {
-        matches!(self, UiScreen::Pause | UiScreen::Settings { from_game: true })
+        matches!(
+            self,
+            UiScreen::Pause | UiScreen::Settings { from_game: true }
+        )
     }
 
     /// The button Enter presses on this screen, if it is a form.
@@ -184,8 +191,13 @@ impl UiAction {
     /// How the button colours itself: tan econ button, a subtle hover tint, or its own colours.
     fn style(self) -> ButtonStyle {
         match self {
-            UiAction::EditValue(_) | UiAction::OpenProfile | UiAction::BackArrow => ButtonStyle::Subtle,
-            UiAction::InvertY | UiAction::SeparateSensitivity | UiAction::Fullscreen | UiAction::OpenTab(_) => ButtonStyle::Custom,
+            UiAction::EditValue(_) | UiAction::OpenProfile | UiAction::BackArrow => {
+                ButtonStyle::Subtle
+            }
+            UiAction::InvertY
+            | UiAction::SeparateSensitivity
+            | UiAction::Fullscreen
+            | UiAction::OpenTab(_) => ButtonStyle::Custom,
             _ => ButtonStyle::Plain,
         }
     }
@@ -354,11 +366,16 @@ impl Plugin for MenuPlugin {
             .init_resource::<LeaderboardRows>()
             .add_systems(OnEnter(AppState::Menu), enter_menu)
             .add_systems(OnExit(AppState::Menu), leave_menu)
-            .add_systems(OnEnter(AppState::InGame), |mut s: ResMut<UiScreen>| *s = UiScreen::Hidden)
-            .add_systems(OnExit(AppState::InGame), |mut s: ResMut<UiScreen>, mut l: ResMut<Listening>| {
-                *s = UiScreen::Hidden;
-                l.0 = None;
+            .add_systems(OnEnter(AppState::InGame), |mut s: ResMut<UiScreen>| {
+                *s = UiScreen::Hidden
             })
+            .add_systems(
+                OnExit(AppState::InGame),
+                |mut s: ResMut<UiScreen>, mut l: ResMut<Listening>| {
+                    *s = UiScreen::Hidden;
+                    l.0 = None;
+                },
+            )
             .add_systems(
                 Update,
                 (
@@ -372,7 +389,8 @@ impl Plugin for MenuPlugin {
                     paste_shortcut.run_if(in_state(AppState::Menu)),
                     type_code.run_if(in_state(AppState::Menu)),
                     apply_paste.run_if(in_state(AppState::Menu)),
-                    auto_join.run_if(in_state(AppState::Menu).and_then(resource_exists::<StartupDone>)),
+                    auto_join
+                        .run_if(in_state(AppState::Menu).and_then(resource_exists::<StartupDone>)),
                     rebuild_ui,
                     wheel_scroll,
                     sync_settings_widgets,
@@ -384,32 +402,62 @@ impl Plugin for MenuPlugin {
                     .chain(),
             )
             // Reads last frame's layout, so it needs no place in the chain (which is full anyway).
-            .add_systems(Update, (measure_title_panel, leaderboard_fetch).chain().run_if(in_state(AppState::Menu)))
+            .add_systems(
+                Update,
+                (measure_title_panel, leaderboard_fetch)
+                    .chain()
+                    .run_if(in_state(AppState::Menu)),
+            )
             .add_systems(OnEnter(AppState::Connecting), setup_connecting)
             .add_systems(OnExit(AppState::Connecting), despawn_ui)
-            .add_systems(Update, (connecting_phase, connecting_screen, connecting_keys).run_if(in_state(AppState::Connecting)));
+            .add_systems(
+                Update,
+                (connecting_phase, connecting_screen, connecting_keys)
+                    .run_if(in_state(AppState::Connecting)),
+            );
     }
 }
 
 fn menu_camera() -> impl Bundle {
-    (Camera2d, Camera { clear_color: ClearColorConfig::Custom(theme::DARK_BROWN), ..default() }, MenuCamera)
+    (
+        Camera2d,
+        Camera {
+            clear_color: ClearColorConfig::Custom(theme::DARK_BROWN),
+            ..default()
+        },
+        MenuCamera,
+    )
 }
 
-fn enter_menu(mut commands: Commands, mut screen: ResMut<UiScreen>, mut ret: ResMut<ReturnScreen>, cam: Query<Entity, With<Camera>>) {
+fn enter_menu(
+    mut commands: Commands,
+    mut screen: ResMut<UiScreen>,
+    mut ret: ResMut<ReturnScreen>,
+    cam: Query<Entity, With<Camera>>,
+) {
     if cam.is_empty() {
         commands.spawn(menu_camera());
     }
     *screen = ret.0.take().unwrap_or(UiScreen::Main);
 }
 
-fn leave_menu(mut commands: Commands, cams: Query<Entity, With<MenuCamera>>, roots: Query<Entity, With<UiRoot>>, mut form: ResMut<Form>) {
+fn leave_menu(
+    mut commands: Commands,
+    cams: Query<Entity, With<MenuCamera>>,
+    roots: Query<Entity, With<UiRoot>>,
+    mut form: ResMut<Form>,
+) {
     form.focus = None;
     for e in cams.iter().chain(roots.iter()) {
         commands.entity(e).despawn();
     }
 }
 
-fn despawn_ui(mut commands: Commands, q: Query<Entity, With<UiRoot>>, cams: Query<Entity, With<MenuCamera>>) {
+fn despawn_ui(
+    mut commands: Commands,
+    q: Query<Entity, With<UiRoot>>,
+    cams: Query<Entity, With<MenuCamera>>,
+) {
     for e in q.iter().chain(cams.iter()) {
         commands.entity(e).despawn();
     }
@@ -487,16 +535,28 @@ fn scrolling_panel_column(padding: f32, scroll: Vec2) -> impl Bundle {
 fn section(theme: &Theme, title: &str) -> impl Bundle {
     (
         theme.heading_flat(title.to_uppercase(), 20.0, theme::ORANGE),
-        Node { width: Val::Px(ROW_W), margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(2.0)), ..default() },
+        Node {
+            width: Val::Px(ROW_W),
+            margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(2.0)),
+            ..default()
+        },
     )
 }
 
 fn no_wrap() -> TextLayout {
-    TextLayout { linebreak: LineBreak::NoWrap, ..default() }
+    TextLayout {
+        linebreak: LineBreak::NoWrap,
+        ..default()
+    }
 }
 
 /// A settings row: label on the left, controls right-aligned.
-fn row(p: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: &str, f: impl FnOnce(&mut RelatedSpawnerCommands<ChildOf>)) {
+fn row(
+    p: &mut RelatedSpawnerCommands<ChildOf>,
+    theme: &Theme,
+    label: &str,
+    f: impl FnOnce(&mut RelatedSpawnerCommands<ChildOf>),
+) {
     p.spawn(Node {
         width: Val::Px(ROW_W),
         min_height: Val::Px(40.0),
@@ -506,21 +566,36 @@ fn row(p: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: &str, f: i
     })
     .with_children(|r| {
         r.spawn((theme.label(label, 17.0, theme::TAN_LIGHT), no_wrap()));
-        r.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(12.0), ..default() })
-            .with_children(f);
+        r.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(12.0),
+            ..default()
+        })
+        .with_children(f);
     });
 }
 
 /// Slider + value box for one setting. The slider is dragged; the value box is clicked to type an
 /// exact number.
-fn slider_controls(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, s: &Settings, slider: Slider, width: f32) {
+fn slider_controls(
+    c: &mut RelatedSpawnerCommands<ChildOf>,
+    theme: &Theme,
+    s: &Settings,
+    slider: Slider,
+    width: f32,
+) {
     let axis = slider;
     let frac = slider.fraction(s);
     // Track (the clickable area is taller than the bar so it is easy to grab).
     c.spawn((
         Button,
         SliderTrack(axis),
-        Node { width: Val::Px(width), height: Val::Px(26.0), ..default() },
+        Node {
+            width: Val::Px(width),
+            height: Val::Px(26.0),
+            ..default()
+        },
     ))
     .with_children(|t| {
         t.spawn(theme::inset(Node {
@@ -561,7 +636,13 @@ fn slider_controls(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, s: &S
             },
             BackgroundColor(theme::TAN_LIGHT),
             BorderColor::all(theme::TAN_DARKER),
-            BoxShadow::new(Color::srgba(0.0, 0.0, 0.0, 0.5), Val::Px(0.0), Val::Px(2.0), Val::Px(0.0), Val::Px(3.0)),
+            BoxShadow::new(
+                Color::srgba(0.0, 0.0, 0.0, 0.5),
+                Val::Px(0.0),
+                Val::Px(2.0),
+                Val::Px(0.0),
+                Val::Px(3.0),
+            ),
         ));
     });
     // Value box.
@@ -577,7 +658,11 @@ fn slider_controls(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, s: &S
         }),
     ))
     .with_children(|b| {
-        b.spawn((ValueText(axis), theme.heading_flat(slider.display(s), 16.0, theme::YELLOW), no_wrap()));
+        b.spawn((
+            ValueText(axis),
+            theme.heading_flat(slider.display(s), 16.0, theme::YELLOW),
+            no_wrap(),
+        ));
     });
 }
 
@@ -593,7 +678,15 @@ fn toggle_cell(theme: &Theme, text: &str, active: bool) -> impl Bundle {
         },
         BackgroundColor(if active { theme::ORANGE } else { Color::NONE }),
         children![(
-            theme.heading_flat(text.to_string(), 13.0, if active { theme::TAN_DARKER } else { theme::OFF_WHITE }),
+            theme.heading_flat(
+                text.to_string(),
+                13.0,
+                if active {
+                    theme::TAN_DARKER
+                } else {
+                    theme::OFF_WHITE
+                }
+            ),
             no_wrap()
         )],
     )
@@ -653,7 +746,11 @@ fn rebuild_ui(
     let now = time.elapsed_secs_f64();
     refresh.0 = false;
     // A refresh (binding captured, toggle flipped, ...) keeps the scroll offset; a new screen starts at the top.
-    let scroll = if screen.is_changed() { Vec2::ZERO } else { panes.iter().next().map(|p| p.0).unwrap_or_default() };
+    let scroll = if screen.is_changed() {
+        Vec2::ZERO
+    } else {
+        panes.iter().next().map(|p| p.0).unwrap_or_default()
+    };
     // The connecting screen is built by `setup_connecting` and must not be torn down here.
     if *state.get() == AppState::Connecting {
         return;
@@ -678,10 +775,27 @@ fn rebuild_ui(
     }
     match *screen {
         UiScreen::Hidden => {}
-        UiScreen::Main => spawn_main(&mut commands, &theme, &typed, &settings, &status, &account, &form),
-        UiScreen::Leaderboard => spawn_leaderboard(&mut commands, &theme, &account, &form, extra.panel_size.0),
+        UiScreen::Main => spawn_main(
+            &mut commands,
+            &theme,
+            &typed,
+            &settings,
+            &status,
+            &account,
+            &form,
+        ),
+        UiScreen::Leaderboard => {
+            spawn_leaderboard(&mut commands, &theme, &account, &form, extra.panel_size.0)
+        }
         UiScreen::Pause => spawn_pause(&mut commands, &theme),
-        UiScreen::Settings { from_game } => spawn_settings(&mut commands, &theme, &settings, listening.0, from_game, scroll),
+        UiScreen::Settings { from_game } => spawn_settings(
+            &mut commands,
+            &theme,
+            &settings,
+            listening.0,
+            from_game,
+            scroll,
+        ),
         UiScreen::Login => spawn_login(&mut commands, &theme, &account, &form),
         UiScreen::Register => spawn_register(&mut commands, &theme, &account, &form),
         UiScreen::Verify => spawn_verify(&mut commands, &theme, &account, &form, now),
@@ -695,41 +809,93 @@ fn rebuild_ui(
     }
 }
 
-/// Top of the main panel while this build is out of date: what happens and the button that does it.
-fn update_banner(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme) {
-    let (hint, label) = if cfg!(target_arch = "wasm32") {
-        ("the page reloads to fetch it.", "Reload")
+/// Top of the main panel while the server runs a newer build: what happens and the button that
+/// does it. The desktop packages go up a few minutes after the server, so until the site's package
+/// is the server's build the button waits. Only a protocol change greys out online play; a build
+/// that changed nothing the server checks keeps playing meanwhile.
+fn update_banner(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, status: &SignalingStatus) {
+    let web = cfg!(target_arch = "wasm32");
+    let (hint, label, waiting) = if web {
+        ("the page reloads to fetch it.", "Reload", false)
+    } else if status.package_ready() {
+        (
+            "the update downloads and restarts the game.",
+            "Update now",
+            false,
+        )
     } else {
-        ("the update downloads and restarts the game.", "Update now")
+        ("waiting for new version to deploy...", "Update now", true)
     };
     c.spawn(theme.heading_flat("A NEW VERSION IS AVAILABLE", 16.0, theme::LIGHT_RED));
-    c.spawn((theme.label(hint, 12.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(4.0)), ..default() }));
-    c.spawn(button(theme, label, UiAction::Update));
-    c.spawn((theme.label("", 4.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+    c.spawn((
+        theme.label(hint, 12.0, theme::OFF_WHITE),
+        Node {
+            margin: UiRect::bottom(Val::Px(4.0)),
+            ..default()
+        },
+    ));
+    if waiting {
+        online_button(
+            c,
+            theme,
+            label,
+            UiAction::Update,
+            Some("the desktop package is not published yet; try again in a few minutes."),
+        );
+    } else {
+        c.spawn(button(theme, label, UiAction::Update));
+    }
+    if !web && !status.is_outdated() {
+        c.spawn((
+            theme.label(
+                "matches still work on this build until then.",
+                12.0,
+                theme::OFF_WHITE,
+            ),
+            Node {
+                margin: UiRect::top(Val::Px(4.0)),
+                ..default()
+            },
+        ));
+    }
+    c.spawn((
+        theme.label("", 4.0, theme::OFF_WHITE),
+        Node {
+            margin: UiRect::bottom(Val::Px(6.0)),
+            ..default()
+        },
+    ));
 }
 
 /// A tan button, greyed out with a hover tooltip when `disabled`. Returns the button entity.
-fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: &str, action: UiAction, disabled: Option<&str>) -> Entity {
+fn online_button(
+    c: &mut RelatedSpawnerCommands<ChildOf>,
+    theme: &Theme,
+    label: &str,
+    action: UiAction,
+    disabled: Option<&str>,
+) -> Entity {
     let mut e = c.spawn(button(theme, label, action));
     let Some(tooltip_text) = disabled else {
         return e.id();
     };
-    e.insert((Disabled, BackgroundColor(BTN_DISABLED))).with_children(|b| {
-        b.spawn((
-            Tooltip,
-            Visibility::Hidden,
-            GlobalZIndex(10),
-            theme::panel(Node {
-                position_type: PositionType::Absolute,
-                top: Val::Percent(100.0),
-                left: Val::Px(0.0),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                margin: UiRect::top(Val::Px(4.0)),
-                ..default()
-            }),
-            children![(theme.label(tooltip_text, 13.0, theme::LIGHT_RED), no_wrap())],
-        ));
-    });
+    e.insert((Disabled, BackgroundColor(BTN_DISABLED)))
+        .with_children(|b| {
+            b.spawn((
+                Tooltip,
+                Visibility::Hidden,
+                GlobalZIndex(10),
+                theme::panel(Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Percent(100.0),
+                    left: Val::Px(0.0),
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                    margin: UiRect::top(Val::Px(4.0)),
+                    ..default()
+                }),
+                children![(theme.label(tooltip_text, 13.0, theme::LIGHT_RED), no_wrap())],
+            ));
+        });
     e.id()
 }
 
@@ -755,18 +921,32 @@ fn online_label(stats: Option<Stats>) -> String {
 }
 
 /// The small "(N players)" text inside a queue button, right after its label.
-fn count_child(c: &mut RelatedSpawnerCommands<ChildOf>, button: Entity, theme: &Theme, stats: Option<Stats>, kind: QueueKind) {
+fn count_child(
+    c: &mut RelatedSpawnerCommands<ChildOf>,
+    button: Entity,
+    theme: &Theme,
+    stats: Option<Stats>,
+    kind: QueueKind,
+) {
     c.commands().entity(button).with_child((
         CountText(kind),
         theme.heading_flat(count_label(stats, kind), 12.0, theme::BTN_TEXT),
         no_wrap(),
-        Node { margin: UiRect::left(Val::Px(8.0)), ..default() },
+        Node {
+            margin: UiRect::left(Val::Px(8.0)),
+            ..default()
+        },
     ));
 }
 
 /// Top-right corner of the title screen: who you are. Logged in: the class icon and the account
 /// name (click for the profile). Logged out: the log in button and the anonymous name box.
-fn spawn_identity(p: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, account: &Account, form: &Form) {
+fn spawn_identity(
+    p: &mut RelatedSpawnerCommands<ChildOf>,
+    theme: &Theme,
+    account: &Account,
+    form: &Form,
+) {
     p.spawn(Node {
         position_type: PositionType::Absolute,
         top: Val::Px(14.0),
@@ -793,13 +973,28 @@ fn spawn_identity(p: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, accoun
             ))
             .with_children(|b| {
                 b.spawn(theme.soldier_icon(26.0));
-                b.spawn((theme.heading(user.username.clone(), 22.0, theme::TAN_LIGHT), no_wrap()));
+                b.spawn((
+                    theme.heading(user.username.clone(), 22.0, theme::TAN_LIGHT),
+                    no_wrap(),
+                ));
             });
-            c.spawn((theme.label(format!("{} ELO", user.elo), 13.0, theme::OFF_WHITE), Node { margin: UiRect::right(Val::Px(10.0)), ..default() }));
+            c.spawn((
+                theme.label(format!("{} ELO", user.elo), 13.0, theme::OFF_WHITE),
+                Node {
+                    margin: UiRect::right(Val::Px(10.0)),
+                    ..default()
+                },
+            ));
         } else {
             c.spawn(theme.button("[ log in ]", UiAction::OpenLogin, 170.0, 38.0, 15.0));
             spawn_field(c, theme, form, Field::AnonName, "name", 200.0);
-            c.spawn((theme.label("playing as", 12.0, theme::OFF_WHITE), Node { margin: UiRect::right(Val::Px(4.0)), ..default() }));
+            c.spawn((
+                theme.label("playing as", 12.0, theme::OFF_WHITE),
+                Node {
+                    margin: UiRect::right(Val::Px(4.0)),
+                    ..default()
+                },
+            ));
         }
     });
 }
@@ -837,20 +1032,56 @@ fn title_screen(commands: &mut Commands, theme: &Theme, account: &Account, form:
     commands.entity(root).with_children(|p| {
         // First child so it draws beneath everything; absolute, so it joins no layout.
         p.spawn(theme.menu_backdrop());
-        // Build identity in the corner, so two people can tell at a glance whether they match.
+        // Build and protocol identity in the corner, so two people can tell at a glance whether
+        // they match.
         p.spawn((
-            theme.label(format!("build {}", endif_sim::protocol_id()), 11.0, theme::TAN_DARK),
-            Node { position_type: PositionType::Absolute, right: Val::Px(10.0), bottom: Val::Px(8.0), ..default() },
+            theme.label(
+                format!(
+                    "build {} ({})",
+                    endif_sim::BUILD_ID,
+                    endif_sim::protocol_id()
+                ),
+                11.0,
+                theme::TAN_DARK,
+            ),
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(10.0),
+                bottom: Val::Px(8.0),
+                ..default()
+            },
         ));
         // Web only: the desktop builds are served next to the page (`/download/<platform>`).
         #[cfg(target_arch = "wasm32")]
-        p.spawn(Node { position_type: PositionType::Absolute, left: Val::Px(6.0), bottom: Val::Px(4.0), ..default() })
-            .with_children(|w| {
-                w.spawn(theme.button("download the desktop app", UiAction::OpenDownload, 220.0, 34.0, 12.0));
-            });
+        p.spawn(Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(6.0),
+            bottom: Val::Px(4.0),
+            ..default()
+        })
+        .with_children(|w| {
+            w.spawn(theme.button(
+                "download the desktop app",
+                UiAction::OpenDownload,
+                220.0,
+                34.0,
+                12.0,
+            ));
+        });
         spawn_identity(p, theme, account, form);
     });
-    let spacer = || (Node { flex_grow: 1.0, flex_shrink: 1.0, flex_basis: Val::Px(0.0), min_height: Val::Px(0.0), ..default() }, ChildOf(root));
+    let spacer = || {
+        (
+            Node {
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: Val::Px(0.0),
+                min_height: Val::Px(0.0),
+                ..default()
+            },
+            ChildOf(root),
+        )
+    };
     commands.spawn(spacer());
     let column = commands
         .spawn((
@@ -868,16 +1099,45 @@ fn title_screen(commands: &mut Commands, theme: &Theme, account: &Account, form:
     commands.spawn(spacer());
     commands.entity(column).with_children(|p| {
         // The logo, with the number of connected clients tucked under its right-hand end.
-        p.spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::FlexEnd, margin: UiRect::bottom(Val::Px(8.0)), ..default() })
-            .with_children(|l| {
-                l.spawn(theme.heading("endif.tf", 96.0, theme::ORANGE));
-                // The logo's line box leaves a lot of air under the glyphs; pull the line up into it.
-                l.spawn((OnlineText, theme.label(online_label(account.stats), 13.0, theme::OFF_WHITE), no_wrap(), Node { margin: UiRect { right: Val::Px(4.0), top: Val::Px(-14.0), ..default() }, ..default() }));
-            });
-        p.spawn(Node { min_height: Val::Px(ERROR_SLOT_H), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() })
-            .with_children(|s| {
-                s.spawn((theme.label(account.error.clone().unwrap_or_default(), 14.0, theme::LIGHT_RED), no_wrap()));
-            });
+        p.spawn(Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexEnd,
+            margin: UiRect::bottom(Val::Px(8.0)),
+            ..default()
+        })
+        .with_children(|l| {
+            l.spawn(theme.heading("endif.tf", 96.0, theme::ORANGE));
+            // The logo's line box leaves a lot of air under the glyphs; pull the line up into it.
+            l.spawn((
+                OnlineText,
+                theme.label(online_label(account.stats), 13.0, theme::OFF_WHITE),
+                no_wrap(),
+                Node {
+                    margin: UiRect {
+                        right: Val::Px(4.0),
+                        top: Val::Px(-14.0),
+                        ..default()
+                    },
+                    ..default()
+                },
+            ));
+        });
+        p.spawn(Node {
+            min_height: Val::Px(ERROR_SLOT_H),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|s| {
+            s.spawn((
+                theme.label(
+                    account.error.clone().unwrap_or_default(),
+                    14.0,
+                    theme::LIGHT_RED,
+                ),
+                no_wrap(),
+            ));
+        });
     });
     column
 }
@@ -890,14 +1150,40 @@ fn spawn_tabs(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, selected: 
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         let on = tab == selected;
         let (image, icon, rest, hover) = match tab {
-            Tab::Menu => (theme.tf2_logo.clone(), TAB_ICON, if on { theme::TAN_LIGHT } else { theme::TAN_DARK }, theme::TAN_LIGHT),
-            Tab::Leaderboard => (theme.trophy.clone(), TAB_ICON + 4.0, if on { Color::WHITE } else { Color::srgb(0.6, 0.6, 0.6) }, Color::WHITE),
+            Tab::Menu => (
+                theme.tf2_logo.clone(),
+                TAB_ICON,
+                if on {
+                    theme::TAN_LIGHT
+                } else {
+                    theme::TAN_DARK
+                },
+                theme::TAN_LIGHT,
+            ),
+            Tab::Leaderboard => (
+                theme.trophy.clone(),
+                TAB_ICON + 4.0,
+                if on {
+                    Color::WHITE
+                } else {
+                    Color::srgb(0.6, 0.6, 0.6)
+                },
+                Color::WHITE,
+            ),
         };
         let mut e = c.spawn((
             TabNode { off: !on },
             // Hover tracking; the page on show is not a button (nothing to open, no sounds).
             Interaction::default(),
-            ImageNode { image: if on { theme.tab_on.clone() } else { theme.tab_off.clone() }, image_mode: NodeImageMode::Stretch, ..default() },
+            ImageNode {
+                image: if on {
+                    theme.tab_on.clone()
+                } else {
+                    theme.tab_off.clone()
+                },
+                image_mode: NodeImageMode::Stretch,
+                ..default()
+            },
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(100.0),
@@ -933,7 +1219,13 @@ fn spawn_tabs(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, selected: 
                 },
             ))
             .with_children(|w| {
-                w.spawn((theme::panel(Node { padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)), ..default() }), children![(theme.label(tab.name(), 13.0, theme::OFF_WHITE), no_wrap())]));
+                w.spawn((
+                    theme::panel(Node {
+                        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                        ..default()
+                    }),
+                    children![(theme.label(tab.name(), 13.0, theme::OFF_WHITE), no_wrap())],
+                ));
             });
         });
     }
@@ -950,7 +1242,11 @@ fn tab_hover(
     for (interaction, children, mut art, tab) in &mut tabs {
         let hovered = *interaction != Interaction::None;
         if tab.off {
-            art.color = if hovered { TAB_HOVER_TINT } else { Color::WHITE };
+            art.color = if hovered {
+                TAB_HOVER_TINT
+            } else {
+                Color::WHITE
+            };
         }
         for child in children.iter() {
             if let Ok((icon, mut node)) = icons.get_mut(child)
@@ -959,14 +1255,26 @@ fn tab_hover(
                 node.color = if hovered { icon.hover } else { icon.rest };
             }
             if let Ok(mut vis) = tips.get_mut(child) {
-                *vis = if hovered { Visibility::Visible } else { Visibility::Hidden };
+                *vis = if hovered {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
             }
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Settings, status: &SignalingStatus, account: &Account, form: &Form) {
+fn spawn_main(
+    commands: &mut Commands,
+    theme: &Theme,
+    typed: &TypedCode,
+    s: &Settings,
+    status: &SignalingStatus,
+    account: &Account,
+    form: &Form,
+) {
     let offline = if status.is_outdated() {
         Some(if cfg!(target_arch = "wasm32") {
             "this build is out of date: reload the page (Ctrl+Shift+R)."
@@ -978,84 +1286,134 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
     } else {
         None
     };
-    let ranked_offline = offline.or((!account.logged_in()).then_some("log in to play matchmaking."));
+    let ranked_offline =
+        offline.or((!account.logged_in()).then_some("log in to play matchmaking."));
     let column = title_screen(commands, theme, account, form);
     commands.entity(column).with_children(|p| {
-        p.spawn((panel_column(18.0), TitlePanel)).with_children(|c| {
-            spawn_tabs(c, theme, Tab::Menu);
-            if status.is_outdated() {
-                update_banner(c, theme);
-            }
-            let quick = online_button(c, theme, "Quick play", UiAction::QuickPlay, offline);
-            count_child(c, quick, theme, account.stats, QueueKind::Quick);
-            let competitive = online_button(c, theme, "Competitive", UiAction::Competitive, ranked_offline);
-            count_child(c, competitive, theme, account.stats, QueueKind::Competitive);
-            c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
-            online_button(c, theme, "Create private room", UiAction::CreateRoom, offline);
+        p.spawn((panel_column(18.0), TitlePanel))
+            .with_children(|c| {
+                spawn_tabs(c, theme, Tab::Menu);
+                if status.update_available() {
+                    update_banner(c, theme, status);
+                }
+                let quick = online_button(c, theme, "Quick play", UiAction::QuickPlay, offline);
+                count_child(c, quick, theme, account.stats, QueueKind::Quick);
+                let competitive = online_button(
+                    c,
+                    theme,
+                    "Competitive",
+                    UiAction::Competitive,
+                    ranked_offline,
+                );
+                count_child(c, competitive, theme, account.stats, QueueKind::Competitive);
+                c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
+                online_button(
+                    c,
+                    theme,
+                    "Create private room",
+                    UiAction::CreateRoom,
+                    offline,
+                );
 
-            c.spawn((
-                theme.heading_flat("JOIN A ROOM", 20.0, theme::ORANGE),
-                Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(2.0)), ..default() },
-            ));
-            c.spawn(theme.label("type the six letter code", 13.0, theme::OFF_WHITE));
-            c.spawn(Node {
-                width: Val::Px(BUTTON_W - 8.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(6.0),
-                margin: UiRect::vertical(Val::Px(4.0)),
-                ..default()
-            })
-            .with_children(|r| {
-                r.spawn(theme::inset(Node {
-                    flex_grow: 1.0,
-                    height: Val::Px(54.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                }))
-                .with_children(|b| {
-                    b.spawn((CodeField, theme.heading_flat(code_display(&typed.0, ROOM_CODE_LEN), 34.0, theme::YELLOW)));
-                });
-                r.spawn(small_button(theme, "paste", UiAction::Paste));
-            });
-            if status.is_outdated() {
                 c.spawn((
-                    theme.label(
-                        if cfg!(target_arch = "wasm32") { "a newer build is available: reload the page" } else { "a newer build is available: update the client" },
-                        13.0,
-                        theme::LIGHT_RED,
-                    ),
-                    Node { margin: UiRect::top(Val::Px(8.0)), ..default() },
+                    theme.heading_flat("JOIN A ROOM", 20.0, theme::ORANGE),
+                    Node {
+                        margin: UiRect::new(
+                            Val::Px(0.0),
+                            Val::Px(0.0),
+                            Val::Px(10.0),
+                            Val::Px(2.0),
+                        ),
+                        ..default()
+                    },
                 ));
-            }
-            online_button(c, theme, "Join room", UiAction::JoinRoom, offline);
-            c.spawn(button(theme, "Settings", UiAction::OpenSettings));
+                c.spawn(theme.label("type the six letter code", 13.0, theme::OFF_WHITE));
+                c.spawn(Node {
+                    width: Val::Px(BUTTON_W - 8.0),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(6.0),
+                    margin: UiRect::vertical(Val::Px(4.0)),
+                    ..default()
+                })
+                .with_children(|r| {
+                    r.spawn(theme::inset(Node {
+                        flex_grow: 1.0,
+                        height: Val::Px(54.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    }))
+                    .with_children(|b| {
+                        b.spawn((
+                            CodeField,
+                            theme.heading_flat(
+                                code_display(&typed.0, ROOM_CODE_LEN),
+                                34.0,
+                                theme::YELLOW,
+                            ),
+                        ));
+                    });
+                    r.spawn(small_button(theme, "paste", UiAction::Paste));
+                });
+                if status.is_outdated() {
+                    c.spawn((
+                        theme.label(
+                            if cfg!(target_arch = "wasm32") {
+                                "a newer build is available: reload the page"
+                            } else {
+                                "a newer build is available: update the client"
+                            },
+                            13.0,
+                            theme::LIGHT_RED,
+                        ),
+                        Node {
+                            margin: UiRect::top(Val::Px(8.0)),
+                            ..default()
+                        },
+                    ));
+                }
+                online_button(c, theme, "Join room", UiAction::JoinRoom, offline);
+                c.spawn(button(theme, "Settings", UiAction::OpenSettings));
 
-            // Master volume, always within reach from the title screen. The slider's track has
-            // its own headroom above the bar, so the label sits right on top of it.
-            c.spawn((
-                theme.heading_flat("VOLUME", 16.0, theme::TAN_LIGHT),
-                Node { margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(-6.0)), ..default() },
-            ));
-            c.spawn(Node {
-                width: Val::Px(BUTTON_W),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::SpaceBetween,
-                ..default()
-            })
-            .with_children(|r| slider_controls(r, theme, s, Slider::Volume, BUTTON_W - 84.0 - 12.0));
-        });
+                // Master volume, always within reach from the title screen. The slider's track has
+                // its own headroom above the bar, so the label sits right on top of it.
+                c.spawn((
+                    theme.heading_flat("VOLUME", 16.0, theme::TAN_LIGHT),
+                    Node {
+                        margin: UiRect::new(
+                            Val::Px(0.0),
+                            Val::Px(0.0),
+                            Val::Px(10.0),
+                            Val::Px(-6.0),
+                        ),
+                        ..default()
+                    },
+                ));
+                c.spawn(Node {
+                    width: Val::Px(BUTTON_W),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    ..default()
+                })
+                .with_children(|r| {
+                    slider_controls(r, theme, s, Slider::Volume, BUTTON_W - 84.0 - 12.0)
+                });
+            });
     });
     if let Some(result) = &account.result {
         spawn_result_popup(commands, theme, result);
     }
 }
 
-/// Leaderboard column widths: place, rating, record, win rate. The name takes what is left.
-const LB_COLS: [f32; 4] = [32.0, 48.0, 62.0, 44.0];
-const LB_GAP: f32 = 6.0;
+/// Leaderboard column widths: place, rating, record, win rate. Each is just wide enough for its
+/// widest realistic contents ("#99", "9999", "120 - 95", "100%" and the headings) so that the
+/// name, which takes what is left (~146 px), has room for a 20-character username.
+const LB_COLS: [f32; 4] = [28.0, 32.0, 46.0, 32.0];
+const LB_GAP: f32 = 4.0;
+/// Horizontal padding inside the table box.
+const LB_PAD_X: f32 = 8.0;
 
 /// Height of a leaderboard row (and of the column headings).
 const LB_ROW_H: f32 = 26.0;
@@ -1066,27 +1424,79 @@ const LB_ROWS_MAX: u32 = 50;
 
 /// A row of the leaderboard table, as wide as the panel's contents.
 fn lb_row() -> Node {
-    Node { width: Val::Percent(100.0), min_height: Val::Px(LB_ROW_H), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(LB_GAP), ..default() }
+    Node {
+        width: Val::Percent(100.0),
+        min_height: Val::Px(LB_ROW_H),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(LB_GAP),
+        ..default()
+    }
 }
 
 /// One line of the leaderboard: place, name, rating, record and win rate. `me` lights up the
 /// viewer's own line.
-fn leaderboard_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, e: &LeaderboardEntry, me: bool) {
-    let place = if e.rank == 1 { theme::YELLOW } else { theme::TAN_LIGHT };
+fn leaderboard_row(
+    c: &mut RelatedSpawnerCommands<ChildOf>,
+    theme: &Theme,
+    e: &LeaderboardEntry,
+    me: bool,
+) {
+    let place = if e.rank == 1 {
+        theme::YELLOW
+    } else {
+        theme::TAN_LIGHT
+    };
     let name = if me { theme::YELLOW } else { theme::OFF_WHITE };
     c.spawn(lb_row()).with_children(|r| {
-        cell(r, LB_COLS[0], theme.heading_flat(format!("#{}", e.rank), 14.0, place), JustifyContent::FlexStart);
-        r.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), overflow: Overflow::clip(), ..default() }).with_children(|x| {
+        cell(
+            r,
+            LB_COLS[0],
+            theme.heading_flat(format!("#{}", e.rank), 14.0, place),
+            JustifyContent::FlexStart,
+        );
+        // `min_width: 0` lets a long name shrink (and clip) rather than shove the columns after it.
+        r.spawn(Node {
+            flex_grow: 1.0,
+            flex_basis: Val::Px(0.0),
+            min_width: Val::Px(0.0),
+            overflow: Overflow::clip(),
+            ..default()
+        })
+        .with_children(|x| {
             x.spawn((theme.label(e.username.clone(), 14.0, name), no_wrap()));
         });
-        cell(r, LB_COLS[1], theme.heading_flat(e.elo.to_string(), 15.0, theme::TAN_LIGHT), JustifyContent::FlexEnd);
+        cell(
+            r,
+            LB_COLS[1],
+            theme.heading_flat(e.elo.to_string(), 15.0, theme::TAN_LIGHT),
+            JustifyContent::FlexEnd,
+        );
         // Wins - losses, each in its colour.
-        r.spawn(Node { width: Val::Px(LB_COLS[2]), justify_content: JustifyContent::FlexEnd, column_gap: Val::Px(3.0), flex_shrink: 0.0, ..default() }).with_children(|x| {
-            x.spawn((theme.heading_flat(e.wins.to_string(), 13.0, theme::YELLOW), no_wrap()));
+        r.spawn(Node {
+            width: Val::Px(LB_COLS[2]),
+            justify_content: JustifyContent::FlexEnd,
+            column_gap: Val::Px(3.0),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|x| {
+            x.spawn((
+                theme.heading_flat(e.wins.to_string(), 13.0, theme::YELLOW),
+                no_wrap(),
+            ));
             x.spawn((theme.heading_flat("-", 13.0, theme::TAN_DARK), no_wrap()));
-            x.spawn((theme.heading_flat(e.losses.to_string(), 13.0, theme::LIGHT_RED), no_wrap()));
+            x.spawn((
+                theme.heading_flat(e.losses.to_string(), 13.0, theme::LIGHT_RED),
+                no_wrap(),
+            ));
         });
-        cell(r, LB_COLS[3], theme.label(format!("{:.0}%", e.win_rate()), 13.0, theme::OFF_WHITE), JustifyContent::FlexEnd);
+        cell(
+            r,
+            LB_COLS[3],
+            theme.label(format!("{:.0}%", e.win_rate()), 13.0, theme::OFF_WHITE),
+            JustifyContent::FlexEnd,
+        );
     });
 }
 
@@ -1120,16 +1530,31 @@ fn measure_title_panel(
 
 /// Fetches the first page once the leaderboard tab has been laid out and its row count is known
 /// (opening the tab cannot ask before then). A failure leaves its message and does not retry.
-fn leaderboard_fetch(mut account: ResMut<Account>, screen: Res<UiScreen>, rows: Res<LeaderboardRows>, cfg: Res<ClientConfig>) {
+fn leaderboard_fetch(
+    mut account: ResMut<Account>,
+    screen: Res<UiScreen>,
+    rows: Res<LeaderboardRows>,
+    cfg: Res<ClientConfig>,
+) {
     let Some(per) = rows.0 else { return };
-    if *screen == UiScreen::Leaderboard && account.leaderboard.is_none() && account.error.is_none() && !account.loading_leaderboard() {
+    if *screen == UiScreen::Leaderboard
+        && account.leaderboard.is_none()
+        && account.error.is_none()
+        && !account.loading_leaderboard()
+    {
         account.fetch_leaderboard(&cfg, 1, per);
     }
 }
 
 /// The title screen's leaderboard tab: the top players by rating, in a panel the size of the
 /// main menu's (`size`), so the frame does not move when the tabs switch.
-fn spawn_leaderboard(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form, size: Option<Vec2>) {
+fn spawn_leaderboard(
+    commands: &mut Commands,
+    theme: &Theme,
+    account: &Account,
+    form: &Form,
+    size: Option<Vec2>,
+) {
     let me = account.user.as_ref().map(|u| u.username.as_str());
     let (width, height) = match size {
         Some(s) => (Val::Px(s.x), Val::Px(s.y)),
@@ -1152,18 +1577,44 @@ fn spawn_leaderboard(commands: &mut Commands, theme: &Theme, account: &Account, 
         }))
         .with_children(|c| {
             spawn_tabs(c, theme, Tab::Leaderboard);
-            c.spawn((theme.heading("LEADERBOARD", 30.0, theme::TAN_LIGHT), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
-            // Column headings, lined up with the rows below (the box has 12 px of side padding).
-            c.spawn(Node { width: Val::Percent(100.0), padding: UiRect::horizontal(Val::Px(12.0)), ..default() }).with_children(|w| {
+            c.spawn((
+                theme.heading("LEADERBOARD", 30.0, theme::TAN_LIGHT),
+                Node {
+                    margin: UiRect::bottom(Val::Px(6.0)),
+                    ..default()
+                },
+            ));
+            // Column headings, lined up with the rows below (the box has a 2 px border and `LB_PAD_X`
+            // of side padding).
+            c.spawn(Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::horizontal(Val::Px(LB_PAD_X + 2.0)),
+                ..default()
+            })
+            .with_children(|w| {
                 w.spawn(lb_row()).with_children(|r| {
-                    let head = |r: &mut RelatedSpawnerCommands<ChildOf>, w: f32, s: &str, j: JustifyContent| cell(r, w, theme.heading_flat(s, 11.0, theme::TAN_DARK), j);
+                    let head = |r: &mut RelatedSpawnerCommands<ChildOf>,
+                                w: f32,
+                                s: &str,
+                                j: JustifyContent| {
+                        cell(r, w, theme.heading_flat(s, 11.0, theme::TAN_DARK), j)
+                    };
                     head(r, LB_COLS[0], "#", JustifyContent::FlexStart);
-                    r.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), ..default() }).with_children(|x| {
-                        x.spawn((theme.heading_flat("PLAYER", 11.0, theme::TAN_DARK), no_wrap()));
+                    r.spawn(Node {
+                        flex_grow: 1.0,
+                        flex_basis: Val::Px(0.0),
+                        min_width: Val::Px(0.0),
+                        ..default()
+                    })
+                    .with_children(|x| {
+                        x.spawn((
+                            theme.heading_flat("PLAYER", 11.0, theme::TAN_DARK),
+                            no_wrap(),
+                        ));
                     });
                     head(r, LB_COLS[1], "ELO", JustifyContent::FlexEnd);
                     head(r, LB_COLS[2], "W - L", JustifyContent::FlexEnd);
-                    head(r, LB_COLS[3], "WIN %", JustifyContent::FlexEnd);
+                    head(r, LB_COLS[3], "WIN%", JustifyContent::FlexEnd);
                 });
             });
             // The table fills the rest of the panel; its height decides the players to a page.
@@ -1175,17 +1626,25 @@ fn spawn_leaderboard(commands: &mut Commands, theme: &Theme, account: &Account, 
                     min_height: Val::Px(LB_ROW_H + 2.0 * LB_PAD_Y + 4.0),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
-                    padding: UiRect::axes(Val::Px(12.0), Val::Px(LB_PAD_Y)),
+                    padding: UiRect::axes(Val::Px(LB_PAD_X), Val::Px(LB_PAD_Y)),
                     overflow: Overflow::clip(),
                     ..default()
                 }),
             ))
             .with_children(|list| {
                 let note = |list: &mut RelatedSpawnerCommands<ChildOf>, s: &str| {
-                    list.spawn((theme.label(s, 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
+                    list.spawn((
+                        theme.label(s, 14.0, theme::TAN_DARK),
+                        Node {
+                            margin: UiRect::vertical(Val::Px(12.0)),
+                            ..default()
+                        },
+                    ));
                 };
                 match &account.leaderboard {
-                    Some(lb) if lb.players.is_empty() => note(list, "nobody has played a competitive match yet"),
+                    Some(lb) if lb.players.is_empty() => {
+                        note(list, "nobody has played a competitive match yet")
+                    }
                     Some(lb) => {
                         for e in &lb.players {
                             leaderboard_row(list, theme, e, me == Some(e.username.as_str()));
@@ -1197,19 +1656,45 @@ fn spawn_leaderboard(commands: &mut Commands, theme: &Theme, account: &Account, 
                 }
             });
             // Page buttons: previous, "page N of M", next. The ends are greyed out.
-            let (page, pages) = account.leaderboard.as_ref().map(|lb| (lb.page, lb.pages)).unwrap_or((1, 1));
-            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), margin: UiRect::top(Val::Px(4.0)), ..default() })
-                .with_children(|r| {
-                    let mut prev = r.spawn(small_button(theme, "<", UiAction::LeaderboardPage(page.saturating_sub(1).max(1))));
-                    if page <= 1 {
-                        prev.insert((Disabled, BackgroundColor(BTN_DISABLED)));
-                    }
-                    r.spawn((theme.label(format!("page {page} of {pages}"), 13.0, theme::OFF_WHITE), no_wrap(), Node { min_width: Val::Px(90.0), justify_content: JustifyContent::Center, ..default() }));
-                    let mut next = r.spawn(small_button(theme, ">", UiAction::LeaderboardPage((page + 1).min(pages))));
-                    if page >= pages {
-                        next.insert((Disabled, BackgroundColor(BTN_DISABLED)));
-                    }
-                });
+            let (page, pages) = account
+                .leaderboard
+                .as_ref()
+                .map(|lb| (lb.page, lb.pages))
+                .unwrap_or((1, 1));
+            c.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
+                margin: UiRect::top(Val::Px(4.0)),
+                ..default()
+            })
+            .with_children(|r| {
+                let mut prev = r.spawn(small_button(
+                    theme,
+                    "<",
+                    UiAction::LeaderboardPage(page.saturating_sub(1).max(1)),
+                ));
+                if page <= 1 {
+                    prev.insert((Disabled, BackgroundColor(BTN_DISABLED)));
+                }
+                r.spawn((
+                    theme.label(format!("page {page} of {pages}"), 13.0, theme::OFF_WHITE),
+                    no_wrap(),
+                    Node {
+                        min_width: Val::Px(90.0),
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                ));
+                let mut next = r.spawn(small_button(
+                    theme,
+                    ">",
+                    UiAction::LeaderboardPage((page + 1).min(pages)),
+                ));
+                if page >= pages {
+                    next.insert((Disabled, BackgroundColor(BTN_DISABLED)));
+                }
+            });
         });
     });
 }
@@ -1229,17 +1714,39 @@ fn spawn_result_popup(commands: &mut Commands, theme: &Theme, result: &RankedRes
         Rating::Unconfirmed => "rating not confirmed yet; check your profile in a moment",
     };
     let root = screen_root(commands, theme, true);
-    commands.entity(root).insert(GlobalZIndex(20)).with_children(|p| {
-        p.spawn(panel_column(26.0)).with_children(|c| {
-            c.spawn((theme.heading(title, 30.0, color), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
-            if let Rating::Settled(d) = result.rating {
-                c.spawn((theme.heading_flat(format!("{d:+} ELO"), 34.0, color), Node { margin: UiRect::bottom(Val::Px(16.0)), ..default() }));
-            } else {
-                c.spawn((theme.label(note, 14.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(16.0)), max_width: Val::Px(440.0), ..default() }));
-            }
-            c.spawn(theme.button("OK", UiAction::ResultOk, 160.0, BUTTON_H, 18.0));
+    commands
+        .entity(root)
+        .insert(GlobalZIndex(20))
+        .with_children(|p| {
+            p.spawn(panel_column(26.0)).with_children(|c| {
+                c.spawn((
+                    theme.heading(title, 30.0, color),
+                    Node {
+                        margin: UiRect::bottom(Val::Px(8.0)),
+                        ..default()
+                    },
+                ));
+                if let Rating::Settled(d) = result.rating {
+                    c.spawn((
+                        theme.heading_flat(format!("{d:+} ELO"), 34.0, color),
+                        Node {
+                            margin: UiRect::bottom(Val::Px(16.0)),
+                            ..default()
+                        },
+                    ));
+                } else {
+                    c.spawn((
+                        theme.label(note, 14.0, theme::OFF_WHITE),
+                        Node {
+                            margin: UiRect::bottom(Val::Px(16.0)),
+                            max_width: Val::Px(440.0),
+                            ..default()
+                        },
+                    ));
+                }
+                c.spawn(theme.button("OK", UiAction::ResultOk, 160.0, BUTTON_H, 18.0));
+            });
         });
-    });
 }
 
 fn spawn_pause(commands: &mut Commands, theme: &Theme) {
@@ -1247,7 +1754,13 @@ fn spawn_pause(commands: &mut Commands, theme: &Theme) {
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(22.0)).with_children(|c| {
             c.spawn(theme.heading("PAUSED", 44.0, theme::TAN_LIGHT));
-            c.spawn((theme.label("the match keeps running", 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(12.0)), ..default() }));
+            c.spawn((
+                theme.label("the match keeps running", 13.0, theme::OFF_WHITE),
+                Node {
+                    margin: UiRect::bottom(Val::Px(12.0)),
+                    ..default()
+                },
+            ));
             c.spawn(button(theme, "Resume", UiAction::Resume));
             c.spawn(button(theme, "Settings", UiAction::OpenSettings));
             c.spawn(button(theme, "Leave match", UiAction::Leave));
@@ -1257,7 +1770,12 @@ fn spawn_pause(commands: &mut Commands, theme: &Theme) {
 
 /// Whether any action sits on a Ctrl key, the one the browser pairs with W to close the tab.
 fn binds_ctrl(s: &Settings) -> bool {
-    Action::ALL.iter().any(|a| matches!(s.bindings.get(*a), Binding::Key(KeyCode::ControlLeft | KeyCode::ControlRight)))
+    Action::ALL.iter().any(|a| {
+        matches!(
+            s.bindings.get(*a),
+            Binding::Key(KeyCode::ControlLeft | KeyCode::ControlRight)
+        )
+    })
 }
 
 /// Explains what the fullscreen toggle buys in this browser (web only).
@@ -1285,70 +1803,135 @@ fn ctrl_note(s: &Settings) -> Option<&'static str> {
     if crate::webclip::can_lock_keyboard() {
         (!s.fullscreen).then_some("Ctrl+W tries to close the tab outside fullscreen: turn on fullscreen on play, or use Shift")
     } else {
-        Some("Ctrl+W tries to close the tab in this browser (a leave-page prompt catches it): Shift is safer")
+        Some(
+            "Ctrl+W tries to close the tab in this browser (a leave-page prompt catches it): Shift is safer",
+        )
     }
 }
 
-fn spawn_settings(commands: &mut Commands, theme: &Theme, s: &Settings, listening: Option<Action>, from_game: bool, scroll: Vec2) {
+fn spawn_settings(
+    commands: &mut Commands,
+    theme: &Theme,
+    s: &Settings,
+    listening: Option<Action>,
+    from_game: bool,
+    scroll: Vec2,
+) {
     let root = screen_root(commands, theme, from_game);
     commands.entity(root).with_children(|p| {
-        p.spawn(scrolling_panel_column(22.0, scroll)).with_children(|c| {
-            c.spawn((theme.heading("SETTINGS", 40.0, theme::TAN_LIGHT), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+        p.spawn(scrolling_panel_column(22.0, scroll))
+            .with_children(|c| {
+                c.spawn((
+                    theme.heading("SETTINGS", 40.0, theme::TAN_LIGHT),
+                    Node {
+                        margin: UiRect::bottom(Val::Px(6.0)),
+                        ..default()
+                    },
+                ));
 
-            c.spawn(section(theme, "mouse"));
-            if s.separate_sensitivity {
-                row(c, theme, "Sensitivity X", |b| slider_controls(b, theme, s, Slider::Sens(Axis::X), SLIDER_W));
-                row(c, theme, "Sensitivity Y", |b| slider_controls(b, theme, s, Slider::Sens(Axis::Y), SLIDER_W));
-            } else {
-                row(c, theme, "Sensitivity", |b| slider_controls(b, theme, s, Slider::Sens(Axis::X), SLIDER_W));
-            }
-            row(c, theme, "Separate X / Y sensitivity", |b| {
-                b.spawn(toggle(theme, s.separate_sensitivity, UiAction::SeparateSensitivity));
-            });
-            row(c, theme, "Invert Y look", |b| {
-                b.spawn(toggle(theme, s.invert_y, UiAction::InvertY));
-            });
-            c.spawn((
-                theme.label(format!("{:.3} deg per count at TF2 m_yaw 0.022", s.yaw_per_count()), 12.0, theme::TAN_DARK),
-                Node { width: Val::Px(ROW_W), margin: UiRect::bottom(Val::Px(6.0)), ..default() },
-            ));
-
-            c.spawn(section(theme, "audio"));
-            row(c, theme, "Volume", |b| slider_controls(b, theme, s, Slider::Volume, SLIDER_W));
-
-            if cfg!(target_arch = "wasm32") {
-                c.spawn(section(theme, "video"));
-                row(c, theme, "Fullscreen on play", |b| {
-                    b.spawn(toggle(theme, s.fullscreen, UiAction::Fullscreen));
-                });
-                if let Some(note) = fullscreen_note(s) {
-                    c.spawn((theme.label(note, 12.0, theme::TAN_DARK), Node { width: Val::Px(ROW_W), margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+                c.spawn(section(theme, "mouse"));
+                if s.separate_sensitivity {
+                    row(c, theme, "Sensitivity X", |b| {
+                        slider_controls(b, theme, s, Slider::Sens(Axis::X), SLIDER_W)
+                    });
+                    row(c, theme, "Sensitivity Y", |b| {
+                        slider_controls(b, theme, s, Slider::Sens(Axis::Y), SLIDER_W)
+                    });
+                } else {
+                    row(c, theme, "Sensitivity", |b| {
+                        slider_controls(b, theme, s, Slider::Sens(Axis::X), SLIDER_W)
+                    });
                 }
-            }
+                row(c, theme, "Separate X / Y sensitivity", |b| {
+                    b.spawn(toggle(
+                        theme,
+                        s.separate_sensitivity,
+                        UiAction::SeparateSensitivity,
+                    ));
+                });
+                row(c, theme, "Invert Y look", |b| {
+                    b.spawn(toggle(theme, s.invert_y, UiAction::InvertY));
+                });
+                c.spawn((
+                    theme.label(
+                        format!("{:.3} deg per count at TF2 m_yaw 0.022", s.yaw_per_count()),
+                        12.0,
+                        theme::TAN_DARK,
+                    ),
+                    Node {
+                        width: Val::Px(ROW_W),
+                        margin: UiRect::bottom(Val::Px(6.0)),
+                        ..default()
+                    },
+                ));
 
-            c.spawn(section(theme, "keys"));
-            for a in Action::ALL {
-                let value = if listening == Some(a) { "PRESS A KEY".to_string() } else { s.bindings.get(a).label() };
-                row(c, theme, a.label(), |b| {
-                    b.spawn((theme.heading_flat(value, 16.0, theme::YELLOW), no_wrap()));
-                    let mut e = b.spawn(small_button(theme, "bind", UiAction::Bind(a)));
-                    if listening == Some(a) {
-                        e.insert(BackgroundColor(theme::BTN_ACTIVE));
+                c.spawn(section(theme, "audio"));
+                row(c, theme, "Volume", |b| {
+                    slider_controls(b, theme, s, Slider::Volume, SLIDER_W)
+                });
+
+                if cfg!(target_arch = "wasm32") {
+                    c.spawn(section(theme, "video"));
+                    row(c, theme, "Fullscreen on play", |b| {
+                        b.spawn(toggle(theme, s.fullscreen, UiAction::Fullscreen));
+                    });
+                    if let Some(note) = fullscreen_note(s) {
+                        c.spawn((
+                            theme.label(note, 12.0, theme::TAN_DARK),
+                            Node {
+                                width: Val::Px(ROW_W),
+                                margin: UiRect::bottom(Val::Px(6.0)),
+                                ..default()
+                            },
+                        ));
                     }
-                });
-                if a == Action::Crouch
-                    && let Some(note) = ctrl_note(s)
-                {
-                    c.spawn((theme.label(note, 12.0, theme::TAN_DARK), Node { width: Val::Px(ROW_W), margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
                 }
-            }
 
-            c.spawn(Node { flex_direction: FlexDirection::Row, margin: UiRect::top(Val::Px(14.0)), ..default() }).with_children(|b| {
-                b.spawn(theme.button("Reset defaults", UiAction::ResetDefaults, 200.0, BUTTON_H, 16.0));
-                b.spawn(theme.button("Back", UiAction::Back, 200.0, BUTTON_H, 16.0));
+                c.spawn(section(theme, "keys"));
+                for a in Action::ALL {
+                    let value = if listening == Some(a) {
+                        "PRESS A KEY".to_string()
+                    } else {
+                        s.bindings.get(a).label()
+                    };
+                    row(c, theme, a.label(), |b| {
+                        b.spawn((theme.heading_flat(value, 16.0, theme::YELLOW), no_wrap()));
+                        let mut e = b.spawn(small_button(theme, "bind", UiAction::Bind(a)));
+                        if listening == Some(a) {
+                            e.insert(BackgroundColor(theme::BTN_ACTIVE));
+                        }
+                    });
+                    if a == Action::Crouch
+                        && let Some(note) = ctrl_note(s)
+                    {
+                        c.spawn((
+                            theme.label(note, 12.0, theme::TAN_DARK),
+                            Node {
+                                width: Val::Px(ROW_W),
+                                margin: UiRect::bottom(Val::Px(6.0)),
+                                ..default()
+                            },
+                        ));
+                    }
+                }
+
+                c.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    margin: UiRect::top(Val::Px(14.0)),
+                    ..default()
+                })
+                .with_children(|b| {
+                    b.spawn(theme.button(
+                        "Reset defaults",
+                        UiAction::ResetDefaults,
+                        200.0,
+                        BUTTON_H,
+                        16.0,
+                    ));
+                    b.spawn(theme.button("Back", UiAction::Back, 200.0, BUTTON_H, 16.0));
+                });
+                c.spawn(theme.label("Esc goes back", 12.0, theme::TAN_DARK));
             });
-            c.spawn(theme.label("Esc goes back", 12.0, theme::TAN_DARK));
-        });
     });
 }
 
@@ -1356,13 +1939,25 @@ fn spawn_settings(commands: &mut Commands, theme: &Theme, s: &Settings, listenin
 
 /// A titled panel on the title background with a back arrow in its corner and the account status
 /// line under the fields.
-fn form_screen(commands: &mut Commands, theme: &Theme, account: &Account, title: &str, build: impl FnOnce(&mut RelatedSpawnerCommands<ChildOf>)) {
+fn form_screen(
+    commands: &mut Commands,
+    theme: &Theme,
+    account: &Account,
+    title: &str,
+    build: impl FnOnce(&mut RelatedSpawnerCommands<ChildOf>),
+) {
     let root = screen_root(commands, theme, false);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(24.0)).with_children(|c| {
             back_arrow(c, theme);
             // Side margins keep a wide title clear of the arrow.
-            c.spawn((theme.heading(title, 34.0, theme::TAN_LIGHT), Node { margin: UiRect::new(Val::Px(36.0), Val::Px(36.0), Val::Px(0.0), Val::Px(8.0)), ..default() }));
+            c.spawn((
+                theme.heading(title, 34.0, theme::TAN_LIGHT),
+                Node {
+                    margin: UiRect::new(Val::Px(36.0), Val::Px(36.0), Val::Px(0.0), Val::Px(8.0)),
+                    ..default()
+                },
+            ));
             build(c);
             status_line(c, theme, account);
         });
@@ -1401,14 +1996,34 @@ fn status_line(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, account: 
     } else {
         (String::new(), theme::OFF_WHITE)
     };
-    c.spawn(Node { min_height: Val::Px(24.0), max_width: Val::Px(FIELD_W + 160.0), justify_content: JustifyContent::Center, margin: UiRect::vertical(Val::Px(4.0)), ..default() })
-        .with_children(|b| {
-            b.spawn((theme.label(text, 14.0, color), TextLayout { justify: Justify::Center, ..default() }));
-        });
+    c.spawn(Node {
+        min_height: Val::Px(24.0),
+        max_width: Val::Px(FIELD_W + 160.0),
+        justify_content: JustifyContent::Center,
+        margin: UiRect::vertical(Val::Px(4.0)),
+        ..default()
+    })
+    .with_children(|b| {
+        b.spawn((
+            theme.label(text, 14.0, color),
+            TextLayout {
+                justify: Justify::Center,
+                ..default()
+            },
+        ));
+    });
 }
 
-fn buttons_row(c: &mut RelatedSpawnerCommands<ChildOf>, build: impl FnOnce(&mut RelatedSpawnerCommands<ChildOf>)) {
-    c.spawn(Node { flex_direction: FlexDirection::Row, margin: UiRect::top(Val::Px(8.0)), ..default() }).with_children(build);
+fn buttons_row(
+    c: &mut RelatedSpawnerCommands<ChildOf>,
+    build: impl FnOnce(&mut RelatedSpawnerCommands<ChildOf>),
+) {
+    c.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        margin: UiRect::top(Val::Px(8.0)),
+        ..default()
+    })
+    .with_children(build);
 }
 
 fn spawn_login(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form) {
@@ -1426,18 +2041,46 @@ fn spawn_login(commands: &mut Commands, theme: &Theme, account: &Account, form: 
 fn spawn_register(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form) {
     form_screen(commands, theme, account, "CREATE ACCOUNT", |c| {
         spawn_field(c, theme, form, Field::Email, "e-mail", FIELD_W);
-        spawn_field(c, theme, form, Field::Username, "username (3-20: letters, digits, _ - .)", FIELD_W);
-        spawn_field(c, theme, form, Field::Password, "password (8+ characters)", FIELD_W);
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::Username,
+            "username (3-20: letters, digits, _ - .)",
+            FIELD_W,
+        );
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::Password,
+            "password (8+ characters)",
+            FIELD_W,
+        );
         spawn_field(c, theme, form, Field::Password2, "password again", FIELD_W);
         buttons_row(c, |b| {
-            b.spawn(form_button(theme, "create account", UiAction::SubmitRegister));
+            b.spawn(form_button(
+                theme,
+                "create account",
+                UiAction::SubmitRegister,
+            ));
         });
     });
 }
 
 fn spawn_verify(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form, now: f64) {
     form_screen(commands, theme, account, "CHECK YOUR E-MAIL", |c| {
-        c.spawn((theme.label(format!("we sent a 6 digit code to {}", account.pending_email), 14.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+        c.spawn((
+            theme.label(
+                format!("we sent a 6 digit code to {}", account.pending_email),
+                14.0,
+                theme::OFF_WHITE,
+            ),
+            Node {
+                margin: UiRect::bottom(Val::Px(6.0)),
+                ..default()
+            },
+        ));
         spawn_field(c, theme, form, Field::Code, "code", FIELD_W);
         buttons_row(c, |b| {
             b.spawn(form_button(theme, "verify", UiAction::SubmitVerify));
@@ -1456,7 +2099,17 @@ fn resend_button(b: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, ready: 
 
 fn spawn_forgot(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form) {
     form_screen(commands, theme, account, "FORGOT PASSWORD", |c| {
-        c.spawn((theme.label("we will mail you a code to set a new password", 14.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+        c.spawn((
+            theme.label(
+                "we will mail you a code to set a new password",
+                14.0,
+                theme::OFF_WHITE,
+            ),
+            Node {
+                margin: UiRect::bottom(Val::Px(6.0)),
+                ..default()
+            },
+        ));
         spawn_field(c, theme, form, Field::Email, "e-mail", FIELD_W);
         buttons_row(c, |b| {
             b.spawn(form_button(theme, "send code", UiAction::SubmitForgot));
@@ -1466,10 +2119,37 @@ fn spawn_forgot(commands: &mut Commands, theme: &Theme, account: &Account, form:
 
 fn spawn_reset(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form, now: f64) {
     form_screen(commands, theme, account, "RESET PASSWORD", |c| {
-        c.spawn((theme.label(format!("if {} has an account, a code is on its way", account.pending_email), 14.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+        c.spawn((
+            theme.label(
+                format!(
+                    "if {} has an account, a code is on its way",
+                    account.pending_email
+                ),
+                14.0,
+                theme::OFF_WHITE,
+            ),
+            Node {
+                margin: UiRect::bottom(Val::Px(6.0)),
+                ..default()
+            },
+        ));
         spawn_field(c, theme, form, Field::Code, "code", FIELD_W);
-        spawn_field(c, theme, form, Field::Password, "new password (8+ characters)", FIELD_W);
-        spawn_field(c, theme, form, Field::Password2, "new password again", FIELD_W);
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::Password,
+            "new password (8+ characters)",
+            FIELD_W,
+        );
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::Password2,
+            "new password again",
+            FIELD_W,
+        );
         buttons_row(c, |b| {
             b.spawn(form_button(theme, "set password", UiAction::SubmitReset));
             resend_button(b, theme, account.can_resend(now));
@@ -1479,7 +2159,13 @@ fn spawn_reset(commands: &mut Commands, theme: &Theme, account: &Account, form: 
 
 /// Rebuilds the verify / reset screen when the "resend code" wait runs out (or a request lands),
 /// so the button greys in and out without the screen polling every frame.
-fn resend_timer(account: Res<Account>, screen: Res<UiScreen>, time: Res<Time<Real>>, mut refresh: ResMut<UiRefresh>, mut was_ready: Local<Option<bool>>) {
+fn resend_timer(
+    account: Res<Account>,
+    screen: Res<UiScreen>,
+    time: Res<Time<Real>>,
+    mut refresh: ResMut<UiRefresh>,
+    mut was_ready: Local<Option<bool>>,
+) {
     if !matches!(*screen, UiScreen::Verify | UiScreen::Reset) {
         *was_ready = None;
         return;
@@ -1504,9 +2190,30 @@ fn spawn_change_username(commands: &mut Commands, theme: &Theme, account: &Accou
 
 fn spawn_change_password(commands: &mut Commands, theme: &Theme, account: &Account, form: &Form) {
     form_screen(commands, theme, account, "CHANGE PASSWORD", |c| {
-        spawn_field(c, theme, form, Field::CurrentPassword, "current password", FIELD_W);
-        spawn_field(c, theme, form, Field::Password, "new password (8+ characters)", FIELD_W);
-        spawn_field(c, theme, form, Field::Password2, "new password again", FIELD_W);
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::CurrentPassword,
+            "current password",
+            FIELD_W,
+        );
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::Password,
+            "new password (8+ characters)",
+            FIELD_W,
+        );
+        spawn_field(
+            c,
+            theme,
+            form,
+            Field::Password2,
+            "new password again",
+            FIELD_W,
+        );
         buttons_row(c, |b| {
             b.spawn(form_button(theme, "save", UiAction::SubmitPassword));
         });
@@ -1528,15 +2235,30 @@ fn ymd(ts: i64) -> String {
 }
 
 /// A fixed-width cell of a history row.
-fn cell(r: &mut RelatedSpawnerCommands<ChildOf>, w: f32, bundle: impl Bundle, justify: JustifyContent) {
-    r.spawn(Node { width: Val::Px(w), justify_content: justify, flex_shrink: 0.0, ..default() }).with_children(|x| {
+fn cell(
+    r: &mut RelatedSpawnerCommands<ChildOf>,
+    w: f32,
+    bundle: impl Bundle,
+    justify: JustifyContent,
+) {
+    r.spawn(Node {
+        width: Val::Px(w),
+        justify_content: justify,
+        flex_shrink: 0.0,
+        ..default()
+    })
+    .with_children(|x| {
         x.spawn((bundle, no_wrap()));
     });
 }
 
 /// One line of the match history.
 fn history_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, m: &HistoryEntry) {
-    let (result, color) = if m.won { ("WIN", theme::YELLOW) } else { ("LOSS", theme::LIGHT_RED) };
+    let (result, color) = if m.won {
+        ("WIN", theme::YELLOW)
+    } else {
+        ("LOSS", theme::LIGHT_RED)
+    };
     c.spawn(Node {
         width: Val::Px(ROW_W - 40.0),
         min_height: Val::Px(30.0),
@@ -1546,25 +2268,69 @@ fn history_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, m: &Histo
         ..default()
     })
     .with_children(|r| {
-        cell(r, 84.0, theme.label(ymd(m.played_at), 13.0, theme::TAN_DARK), JustifyContent::FlexStart);
-        cell(r, 48.0, theme.heading_flat(result, 14.0, color), JustifyContent::FlexStart);
-        cell(r, 58.0, theme.heading_flat(format!("{} - {}", m.my_score, m.their_score), 15.0, theme::TAN_LIGHT), JustifyContent::Center);
+        cell(
+            r,
+            84.0,
+            theme.label(ymd(m.played_at), 13.0, theme::TAN_DARK),
+            JustifyContent::FlexStart,
+        );
+        cell(
+            r,
+            48.0,
+            theme.heading_flat(result, 14.0, color),
+            JustifyContent::FlexStart,
+        );
+        cell(
+            r,
+            58.0,
+            theme.heading_flat(
+                format!("{} - {}", m.my_score, m.their_score),
+                15.0,
+                theme::TAN_LIGHT,
+            ),
+            JustifyContent::Center,
+        );
         let vs = match m.their_elo {
             Some(elo) => format!("vs {} ({elo})", m.opponent),
             None => format!("vs {}", m.opponent),
         };
-        r.spawn(Node { flex_grow: 1.0, overflow: Overflow::clip(), ..default() }).with_children(|x| {
+        r.spawn(Node {
+            flex_grow: 1.0,
+            overflow: Overflow::clip(),
+            ..default()
+        })
+        .with_children(|x| {
             x.spawn((theme.label(vs, 14.0, theme::OFF_WHITE), no_wrap()));
         });
         // Casual rounds carry no rating: the two rating cells say so instead.
         match (m.ranked, m.my_elo, m.delta) {
             (true, Some(elo), Some(delta)) => {
-                cell(r, 58.0, theme.heading_flat(format!("{delta:+}"), 15.0, color), JustifyContent::FlexEnd);
-                cell(r, 96.0, theme.label(format!("{elo} → {}", elo + delta), 12.0, theme::TAN_DARK), JustifyContent::FlexEnd);
+                cell(
+                    r,
+                    58.0,
+                    theme.heading_flat(format!("{delta:+}"), 15.0, color),
+                    JustifyContent::FlexEnd,
+                );
+                cell(
+                    r,
+                    96.0,
+                    theme.label(format!("{elo} → {}", elo + delta), 12.0, theme::TAN_DARK),
+                    JustifyContent::FlexEnd,
+                );
             }
             _ => {
-                cell(r, 58.0, theme.label("", 15.0, theme::TAN_DARK), JustifyContent::FlexEnd);
-                cell(r, 96.0, theme.label("casual", 12.0, theme::TAN_DARK), JustifyContent::FlexEnd);
+                cell(
+                    r,
+                    58.0,
+                    theme.label("", 15.0, theme::TAN_DARK),
+                    JustifyContent::FlexEnd,
+                );
+                cell(
+                    r,
+                    96.0,
+                    theme.label("casual", 12.0, theme::TAN_DARK),
+                    JustifyContent::FlexEnd,
+                );
             }
         }
     });
@@ -1572,16 +2338,35 @@ fn history_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, m: &Histo
 
 fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scroll: Vec2) {
     let root = screen_root(commands, theme, false);
-    let user = account.profile.as_ref().map(|p| &p.user).or(account.user.as_ref()).cloned().unwrap_or_default();
+    let user = account
+        .profile
+        .as_ref()
+        .map(|p| &p.user)
+        .or(account.user.as_ref())
+        .cloned()
+        .unwrap_or_default();
     let games = user.wins + user.losses;
-    let rate = if games > 0 { format!("{:.0}% win rate", 100.0 * user.wins as f32 / games as f32) } else { "no ranked games yet".to_string() };
+    let rate = if games > 0 {
+        format!("{:.0}% win rate", 100.0 * user.wins as f32 / games as f32)
+    } else {
+        "no ranked games yet".to_string()
+    };
     let rank = account.profile.as_ref().and_then(|p| p.rank);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(24.0)).with_children(|c| {
             back_arrow(c, theme);
-            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(12.0), ..default() }).with_children(|r| {
+            c.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(12.0),
+                ..default()
+            })
+            .with_children(|r| {
                 r.spawn(theme.soldier_icon(40.0));
-                r.spawn((theme.heading(user.username.clone(), 40.0, theme::TAN_LIGHT), no_wrap()));
+                r.spawn((
+                    theme.heading(user.username.clone(), 40.0, theme::TAN_LIGHT),
+                    no_wrap(),
+                ));
                 // The place on the leaderboard hangs off the right of the name, which stays centred.
                 if let Some(rank) = rank {
                     r.spawn(Node {
@@ -1594,16 +2379,35 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
                         ..default()
                     })
                     .with_children(|x| {
-                        x.spawn((theme.heading_flat(format!("(#{rank})"), 22.0, theme::YELLOW), no_wrap()));
+                        x.spawn((
+                            theme.heading_flat(format!("(#{rank})"), 22.0, theme::YELLOW),
+                            no_wrap(),
+                        ));
                     });
                 }
             });
-            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::FlexEnd, column_gap: Val::Px(24.0), margin: UiRect::vertical(Val::Px(8.0)), ..default() })
-                .with_children(|r| {
-                    r.spawn((theme.heading_flat(format!("{} ELO", user.elo), 26.0, theme::YELLOW), no_wrap()));
-                    r.spawn((theme.heading_flat(format!("{}W - {}L", user.wins, user.losses), 20.0, theme::TAN_LIGHT), no_wrap()));
-                    r.spawn((theme.label(rate, 15.0, theme::OFF_WHITE), no_wrap()));
-                });
+            c.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexEnd,
+                column_gap: Val::Px(24.0),
+                margin: UiRect::vertical(Val::Px(8.0)),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((
+                    theme.heading_flat(format!("{} ELO", user.elo), 26.0, theme::YELLOW),
+                    no_wrap(),
+                ));
+                r.spawn((
+                    theme.heading_flat(
+                        format!("{}W - {}L", user.wins, user.losses),
+                        20.0,
+                        theme::TAN_LIGHT,
+                    ),
+                    no_wrap(),
+                ));
+                r.spawn((theme.label(rate, 15.0, theme::OFF_WHITE), no_wrap()));
+            });
 
             c.spawn(section(theme, "match history"));
             c.spawn((
@@ -1621,27 +2425,53 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
                 ScrollPosition(scroll),
                 ScrollPane,
             ))
-            .with_children(|list| {
-                match account.profile.as_ref() {
-                    Some(profile) if profile.matches.is_empty() => {
-                        list.spawn((theme.label("no matches yet: play a competitive match, or a round of quick play", 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
+            .with_children(|list| match account.profile.as_ref() {
+                Some(profile) if profile.matches.is_empty() => {
+                    list.spawn((
+                        theme.label(
+                            "no matches yet: play a competitive match, or a round of quick play",
+                            14.0,
+                            theme::TAN_DARK,
+                        ),
+                        Node {
+                            margin: UiRect::vertical(Val::Px(12.0)),
+                            ..default()
+                        },
+                    ));
+                }
+                Some(profile) => {
+                    for m in &profile.matches {
+                        history_row(list, theme, m);
                     }
-                    Some(profile) => {
-                        for m in &profile.matches {
-                            history_row(list, theme, m);
-                        }
-                    }
-                    None => {
-                        list.spawn((theme.label(if account.busy() { "loading..." } else { "" }, 14.0, theme::TAN_DARK), Node { margin: UiRect::vertical(Val::Px(12.0)), ..default() }));
-                    }
+                }
+                None => {
+                    list.spawn((
+                        theme.label(
+                            if account.busy() { "loading..." } else { "" },
+                            14.0,
+                            theme::TAN_DARK,
+                        ),
+                        Node {
+                            margin: UiRect::vertical(Val::Px(12.0)),
+                            ..default()
+                        },
+                    ));
                 }
             });
             c.spawn(theme.label("scroll with the mouse wheel", 11.0, theme::TAN_DARK));
 
             status_line(c, theme, account);
             buttons_row(c, |b| {
-                b.spawn(form_button(theme, "change username", UiAction::OpenChangeUsername));
-                b.spawn(form_button(theme, "change password", UiAction::OpenChangePassword));
+                b.spawn(form_button(
+                    theme,
+                    "change username",
+                    UiAction::OpenChangeUsername,
+                ));
+                b.spawn(form_button(
+                    theme,
+                    "change password",
+                    UiAction::OpenChangePassword,
+                ));
                 b.spawn(form_button(theme, "log out", UiAction::Logout));
             });
         });
@@ -1649,7 +2479,11 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
 }
 
 fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account, cfg: &ClientConfig) {
-    let kind = account.queue.as_ref().map(|q| q.kind).unwrap_or(QueueKind::Competitive);
+    let kind = account
+        .queue
+        .as_ref()
+        .map(|q| q.kind)
+        .unwrap_or(QueueKind::Competitive);
     let root = screen_root(commands, theme, false);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(26.0)).with_children(|c| {
@@ -1658,24 +2492,57 @@ fn spawn_queue(commands: &mut Commands, theme: &Theme, account: &Account, cfg: &
                 QueueKind::Quick => "QUICK PLAY",
             };
             c.spawn(theme.heading_flat(title, 22.0, theme::ORANGE));
-            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), margin: UiRect::top(Val::Px(12.0)), ..default() })
-                .with_children(|r| {
-                    r.spawn(theme.soldier_icon(32.0));
-                    r.spawn((QueueText, theme.heading_flat("SEARCHING FOR A GAME...", 18.0, theme::TAN_LIGHT), no_wrap()));
-                });
+            c.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
+                margin: UiRect::top(Val::Px(12.0)),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn(theme.soldier_icon(32.0));
+                r.spawn((
+                    QueueText,
+                    theme.heading_flat("SEARCHING FOR A GAME...", 18.0, theme::TAN_LIGHT),
+                    no_wrap(),
+                ));
+            });
             c.spawn((
                 QueueSizeText,
                 theme.label(queue_size_label(account), 13.0, theme::TAN_LIGHT),
-                Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() },
+                Node {
+                    margin: UiRect::bottom(Val::Px(8.0)),
+                    ..default()
+                },
             ));
             let identity = match kind {
-                QueueKind::Competitive => format!("playing as {} ({} ELO)", account.display_name(), account.user.as_ref().map(|u| u.elo).unwrap_or(0)),
+                QueueKind::Competitive => format!(
+                    "playing as {} ({} ELO)",
+                    account.display_name(),
+                    account.user.as_ref().map(|u| u.elo).unwrap_or(0)
+                ),
                 QueueKind::Quick => format!("playing as {}", account.display_name()),
             };
-            c.spawn((theme.label(identity, 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
+            c.spawn((
+                theme.label(identity, 13.0, theme::OFF_WHITE),
+                Node {
+                    margin: UiRect::bottom(Val::Px(8.0)),
+                    ..default()
+                },
+            ));
             if kind == QueueKind::Quick {
                 // An invite: whoever opens the link lands in this queue too (`?qp`, see `auto_join`).
-                c.spawn((theme.label("invite a friend: anyone who opens this link joins the quick play queue", 13.0, theme::OFF_WHITE), Node { margin: UiRect::top(Val::Px(4.0)), ..default() }));
+                c.spawn((
+                    theme.label(
+                        "invite a friend: anyone who opens this link joins the quick play queue",
+                        13.0,
+                        theme::OFF_WHITE,
+                    ),
+                    Node {
+                        margin: UiRect::top(Val::Px(4.0)),
+                        ..default()
+                    },
+                ));
                 crate::copylink::spawn_link_box(c, theme, cfg.quick_play_link());
             }
             c.spawn(theme.button("Cancel", UiAction::CancelQueue, 200.0, BUTTON_H, 16.0));
@@ -1691,9 +2558,19 @@ fn spawn_download(commands: &mut Commands, theme: &Theme) {
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(24.0)).with_children(|c| {
             back_arrow(c, theme);
-            c.spawn((theme.heading("DOWNLOAD", 34.0, theme::TAN_LIGHT), Node { margin: UiRect::new(Val::Px(36.0), Val::Px(36.0), Val::Px(0.0), Val::Px(4.0)), ..default() }));
+            c.spawn((
+                theme.heading("DOWNLOAD", 34.0, theme::TAN_LIGHT),
+                Node {
+                    margin: UiRect::new(Val::Px(36.0), Val::Px(36.0), Val::Px(0.0), Val::Px(4.0)),
+                    ..default()
+                },
+            ));
             for platform in Platform::ALL {
-                c.spawn(button(theme, platform.label(), UiAction::Download(platform)));
+                c.spawn(button(
+                    theme,
+                    platform.label(),
+                    UiAction::Download(platform),
+                ));
             }
         });
     });
@@ -1718,8 +2595,16 @@ fn queue_status(
         let want = match &account.queue {
             Some(q) => {
                 let secs = (time.elapsed_secs_f64() - q.since).max(0.0) as u32;
-                let pos = if q.position > 1 { format!(" ({} ahead)", q.position - 1) } else { String::new() };
-                format!("SEARCHING FOR A GAME... {}:{:02}{pos}", secs / 60, secs % 60)
+                let pos = if q.position > 1 {
+                    format!(" ({} ahead)", q.position - 1)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "SEARCHING FOR A GAME... {}:{:02}{pos}",
+                    secs / 60,
+                    secs % 60
+                )
             }
             None => "SEARCHING FOR A GAME...".to_string(),
         };
@@ -1737,7 +2622,11 @@ fn queue_status(
 
 /// Keeps the main menu's counts (in the queue buttons and under the logo) current without
 /// rebuilding the screen.
-fn activity_counts(account: Res<Account>, mut counts: Query<(&CountText, &mut Text), Without<OnlineText>>, mut online: Query<&mut Text, With<OnlineText>>) {
+fn activity_counts(
+    account: Res<Account>,
+    mut counts: Query<(&CountText, &mut Text), Without<OnlineText>>,
+    mut online: Query<&mut Text, With<OnlineText>>,
+) {
     if !account.is_changed() {
         return;
     }
@@ -1794,7 +2683,15 @@ struct MenuCtx<'w, 's> {
 }
 
 fn ui_buttons(
-    mut q: Query<(&Interaction, &UiAction, &mut BackgroundColor, Option<&Disabled>), Changed<Interaction>>,
+    mut q: Query<
+        (
+            &Interaction,
+            &UiAction,
+            &mut BackgroundColor,
+            Option<&Disabled>,
+        ),
+        Changed<Interaction>,
+    >,
     mut ctx: MenuCtx,
 ) {
     for (interaction, action, mut bg, disabled) in &mut q {
@@ -1817,7 +2714,9 @@ fn ui_buttons(
             },
             Interaction::None => match (style, action) {
                 (ButtonStyle::Plain, _) => *bg = BackgroundColor(theme::BTN),
-                (ButtonStyle::Subtle, UiAction::EditValue(_)) => *bg = BackgroundColor(theme::INSET_BG),
+                (ButtonStyle::Subtle, UiAction::EditValue(_)) => {
+                    *bg = BackgroundColor(theme::INSET_BG)
+                }
                 (ButtonStyle::Subtle, _) => *bg = BackgroundColor(Color::NONE),
                 (ButtonStyle::Custom, _) => {}
             },
@@ -1865,7 +2764,8 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
         UiAction::Competitive => {
             if ctx.account.logged_in() {
                 let now = ctx.time.elapsed_secs_f64();
-                ctx.account.join_queue(&ctx.cfg, now, QueueKind::Competitive);
+                ctx.account
+                    .join_queue(&ctx.cfg, now, QueueKind::Competitive);
                 *ctx.screen = UiScreen::Queue;
             }
         }
@@ -1983,7 +2883,12 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
             if tab == Tab::Leaderboard
                 && let Some(per) = ctx.lb_rows.0
             {
-                let page = ctx.account.leaderboard.as_ref().map(|lb| lb.page).unwrap_or(1);
+                let page = ctx
+                    .account
+                    .leaderboard
+                    .as_ref()
+                    .map(|lb| lb.page)
+                    .unwrap_or(1);
                 ctx.account.fetch_leaderboard(&ctx.cfg, page, per);
             }
             *ctx.screen = tab.screen();
@@ -2001,7 +2906,10 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                match crate::update::launch_updater(&ctx.cfg, ctx.status.server_version.as_deref().unwrap_or("")) {
+                match crate::update::launch_updater(
+                    &ctx.cfg,
+                    ctx.status.server_build.as_deref().unwrap_or(""),
+                ) {
                     Ok(()) => {
                         info!("updater started; quitting");
                         ctx.exit.write(AppExit::Success);
@@ -2120,7 +3028,12 @@ fn back_target(screen: UiScreen, in_game: bool) -> UiScreen {
         UiScreen::Reset => UiScreen::Forgot,
         UiScreen::Register | UiScreen::Forgot => UiScreen::Login,
         UiScreen::ChangeUsername | UiScreen::ChangePassword => UiScreen::Profile,
-        UiScreen::Login | UiScreen::Profile | UiScreen::Queue | UiScreen::Download | UiScreen::Leaderboard | UiScreen::Main => UiScreen::Main,
+        UiScreen::Login
+        | UiScreen::Profile
+        | UiScreen::Queue
+        | UiScreen::Download
+        | UiScreen::Leaderboard
+        | UiScreen::Main => UiScreen::Main,
         UiScreen::Pause | UiScreen::Hidden => {
             if in_game {
                 UiScreen::Pause
@@ -2135,13 +3048,22 @@ fn back_target(screen: UiScreen, in_game: bool) -> UiScreen {
 fn slider_drag(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Query<&Window, With<PrimaryWindow>>,
-    tracks: Query<(Entity, &SliderTrack, &Interaction, &ComputedNode, &UiGlobalTransform)>,
+    tracks: Query<(
+        Entity,
+        &SliderTrack,
+        &Interaction,
+        &ComputedNode,
+        &UiGlobalTransform,
+    )>,
     mut settings: ResMut<Settings>,
     mut editing: ResMut<Editing>,
     mut active: Local<Option<Entity>>,
 ) {
     if mouse.just_pressed(MouseButton::Left) {
-        *active = tracks.iter().find(|(_, _, i, _, _)| **i == Interaction::Pressed).map(|(e, ..)| e);
+        *active = tracks
+            .iter()
+            .find(|(_, _, i, _, _)| **i == Interaction::Pressed)
+            .map(|(e, ..)| e);
         if active.is_some() && editing.0.is_some() {
             commit_edit(&mut editing, &mut settings);
         }
@@ -2153,9 +3075,15 @@ fn slider_drag(
         return;
     }
     let Some(e) = *active else { return };
-    let (Ok((_, track, _, node, transform)), Ok(window)) = (tracks.get(e), window.single()) else { return };
-    let Some(cursor) = window.physical_cursor_position() else { return };
-    let Some(p) = node.normalize_point(*transform, cursor) else { return };
+    let (Ok((_, track, _, node, transform)), Ok(window)) = (tracks.get(e), window.single()) else {
+        return;
+    };
+    let Some(cursor) = window.physical_cursor_position() else {
+        return;
+    };
+    let Some(p) = node.normalize_point(*transform, cursor) else {
+        return;
+    };
     let frac = (p.x + 0.5).clamp(0.0, 1.0);
     let (lo, hi) = track.0.range();
     let value = lo + frac * (hi - lo);
@@ -2166,7 +3094,10 @@ fn slider_drag(
 
 /// Mouse wheel scrolls a `ScrollPane`. Layout clamps the offset it applies but never writes the
 /// clamped value back, so clamp here too or scrolling past the end would build up a dead zone.
-fn wheel_scroll(mut wheel: MessageReader<MouseWheel>, mut panes: Query<(&mut ScrollPosition, &ComputedNode), With<ScrollPane>>) {
+fn wheel_scroll(
+    mut wheel: MessageReader<MouseWheel>,
+    mut panes: Query<(&mut ScrollPosition, &ComputedNode), With<ScrollPane>>,
+) {
     let dy: f32 = wheel
         .read()
         .map(|w| match w.unit {
@@ -2179,7 +3110,10 @@ fn wheel_scroll(mut wheel: MessageReader<MouseWheel>, mut panes: Query<(&mut Scr
     }
     for (mut pos, node) in &mut panes {
         // `ComputedNode` sizes are physical pixels; `ScrollPosition` is logical.
-        let max = (node.content_size - node.size + node.scrollbar_size).max(Vec2::ZERO).y * node.inverse_scale_factor;
+        let max = (node.content_size - node.size + node.scrollbar_size)
+            .max(Vec2::ZERO)
+            .y
+            * node.inverse_scale_factor;
         pos.y = (pos.y - dy).clamp(0.0, max);
     }
 }
@@ -2214,7 +3148,11 @@ fn sync_settings_widgets(
 }
 
 /// Typing into an open sensitivity value box. Enter applies, Esc cancels.
-fn edit_value_keys(mut keys: MessageReader<KeyboardInput>, mut editing: ResMut<Editing>, mut settings: ResMut<Settings>) {
+fn edit_value_keys(
+    mut keys: MessageReader<KeyboardInput>,
+    mut editing: ResMut<Editing>,
+    mut settings: ResMut<Settings>,
+) {
     if editing.0.is_none() {
         keys.clear();
         return;
@@ -2302,7 +3240,11 @@ fn escape_key(
 ) {
     // A value box swallows Esc (it just closed, or is still open). A focused text field does not:
     // Esc goes back from a form even while typing in it.
-    if !keys.just_pressed(KeyCode::Escape) || listening.0.is_some() || editing.0.is_some() || editing.is_changed() {
+    if !keys.just_pressed(KeyCode::Escape)
+        || listening.0.is_some()
+        || editing.0.is_some()
+        || editing.is_changed()
+    {
         return;
     }
     // The result popup goes first.
@@ -2329,8 +3271,17 @@ fn escape_key(
 
 /// Ctrl+V / Cmd+V starts a clipboard read on any menu screen (desktop; on the web the page keeps
 /// the key and the browser's paste event feeds `apply_paste` instead).
-fn paste_shortcut(key_state: Res<ButtonInput<KeyCode>>, mut clipboard: ResMut<Clipboard>, mut paste: ResMut<PendingPaste>) {
-    let modifier = key_state.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
+fn paste_shortcut(
+    key_state: Res<ButtonInput<KeyCode>>,
+    mut clipboard: ResMut<Clipboard>,
+    mut paste: ResMut<PendingPaste>,
+) {
+    let modifier = key_state.any_pressed([
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
     if modifier && key_state.just_pressed(KeyCode::KeyV) {
         paste.0 = crate::webclip::request_paste(&mut clipboard);
     }
@@ -2352,7 +3303,12 @@ fn type_code(
         return;
     }
     // Shortcuts must not type their letter into the code.
-    let modifier = key_state.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
+    let modifier = key_state.any_pressed([
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
     let mut changed = false;
     for ev in keys.read() {
         if !ev.state.is_pressed() {
@@ -2387,13 +3343,20 @@ fn type_code(
 
 /// Applies a finished clipboard read: into the focused text field, or else the room code field
 /// (a bare code or an invite link).
-fn apply_paste(mut paste: ResMut<PendingPaste>, mut typed: ResMut<TypedCode>, mut field: Query<&mut Text, With<CodeField>>, mut form: ResMut<Form>) {
+fn apply_paste(
+    mut paste: ResMut<PendingPaste>,
+    mut typed: ResMut<TypedCode>,
+    mut field: Query<&mut Text, With<CodeField>>,
+    mut form: ResMut<Form>,
+) {
     // Web: text handed over by the page's paste handlers.
     let result = match crate::webclip::take_pasted() {
         Some(text) => Ok(text),
         None => {
             let Some(read) = paste.0.as_mut() else { return };
-            let Some(result) = read.poll_result() else { return };
+            let Some(result) = read.poll_result() else {
+                return;
+            };
             paste.0 = None;
             result
         }
@@ -2422,7 +3385,13 @@ fn apply_paste(mut paste: ResMut<PendingPaste>, mut typed: ResMut<TypedCode>, mu
 /// (`?qp` or `--quick`). Waits for the web loading screen to be gone (`StartupDone`) so the match
 /// cannot start, and the countdown run, under it while the assets and the render warm-up are
 /// still in progress.
-fn auto_join(mut cfg: ResMut<ClientConfig>, mut cmds: MessageWriter<NetCommand>, mut account: ResMut<Account>, mut screen: ResMut<UiScreen>, time: Res<Time<Real>>) {
+fn auto_join(
+    mut cfg: ResMut<ClientConfig>,
+    mut cmds: MessageWriter<NetCommand>,
+    mut account: ResMut<Account>,
+    mut screen: ResMut<UiScreen>,
+    time: Res<Time<Real>>,
+) {
     if let Some(code) = cfg.initial_room.take()
         && code.len() == ROOM_CODE_LEN
     {
@@ -2461,24 +3430,50 @@ fn setup_connecting(
         p.spawn(panel_column(26.0)).with_children(|c| {
             // "me VS them", with or without ratings.
             let versus = |c: &mut RelatedSpawnerCommands<ChildOf>, me: String, them: String| {
-                c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(18.0), margin: UiRect::vertical(Val::Px(10.0)), ..default() })
-                    .with_children(|r| {
-                        r.spawn((theme.heading(me, 30.0, theme::RED_TEAM), no_wrap()));
-                        r.spawn(theme.heading_flat("VS", 18.0, theme::OFF_WHITE));
-                        r.spawn((theme.heading(them, 30.0, theme::BLU_TEAM), no_wrap()));
-                    });
+                c.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(18.0),
+                    margin: UiRect::vertical(Val::Px(10.0)),
+                    ..default()
+                })
+                .with_children(|r| {
+                    r.spawn((theme.heading(me, 30.0, theme::RED_TEAM), no_wrap()));
+                    r.spawn(theme.heading_flat("VS", 18.0, theme::OFF_WHITE));
+                    r.spawn((theme.heading(them, 30.0, theme::BLU_TEAM), no_wrap()));
+                });
             };
             match kind.as_deref() {
                 Some(MatchKind::Ranked(info)) => {
                     c.spawn(theme.heading_flat("RANKED MATCH", 22.0, theme::ORANGE));
-                    let me = account.user.as_ref().map(|u| (u.username.clone(), u.elo)).unwrap_or((account.display_name(), 0));
-                    versus(c, format!("{} ({})", me.0, me.1), format!("{} ({})", info.opponent, info.opponent_elo));
-                    c.spawn((theme.label("first to 5 airshots; leaving early forfeits the match", 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
+                    let me = account
+                        .user
+                        .as_ref()
+                        .map(|u| (u.username.clone(), u.elo))
+                        .unwrap_or((account.display_name(), 0));
+                    versus(
+                        c,
+                        format!("{} ({})", me.0, me.1),
+                        format!("{} ({})", info.opponent, info.opponent_elo),
+                    );
+                    c.spawn((
+                        theme.label("ft5; leaving early ffs", 13.0, theme::OFF_WHITE),
+                        Node {
+                            margin: UiRect::bottom(Val::Px(8.0)),
+                            ..default()
+                        },
+                    ));
                 }
                 Some(MatchKind::Quick(info)) => {
                     c.spawn(theme.heading_flat("QUICK PLAY", 22.0, theme::ORANGE));
                     versus(c, account.display_name(), info.opponent.clone());
-                    c.spawn((theme.label("unranked: rounds go on until someone leaves", 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
+                    c.spawn((
+                        theme.label("unranked", 13.0, theme::OFF_WHITE),
+                        Node {
+                            margin: UiRect::bottom(Val::Px(8.0)),
+                            ..default()
+                        },
+                    ));
                 }
                 _ => {
                     c.spawn(theme.heading_flat("PRIVATE ROOM", 22.0, theme::ORANGE));
@@ -2488,26 +3483,61 @@ fn setup_connecting(
                         ..default()
                     }))
                     .with_children(|b| {
-                        b.spawn(theme.heading(code_display(&code, ROOM_CODE_LEN), 64.0, theme::YELLOW));
+                        b.spawn(theme.heading(
+                            code_display(&code, ROOM_CODE_LEN),
+                            64.0,
+                            theme::YELLOW,
+                        ));
                     });
-                    c.spawn(theme.label("share this link to invite someone:", 14.0, theme::OFF_WHITE));
+                    c.spawn(theme.label(
+                        "share this link to invite someone:",
+                        14.0,
+                        theme::OFF_WHITE,
+                    ));
                     crate::copylink::spawn_link_box(c, &theme, cfg.join_link(&code));
                 }
             }
-            c.spawn((theme.label(format!("matchmaking via {}", cfg.signaling_url), 11.0, theme::TAN_DARK), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
-            c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(10.0), ..default() })
-                .with_children(|r| {
-                    r.spawn(theme.soldier_icon(32.0));
-                    r.spawn((ConnectingText, theme.heading_flat("CONNECTING TO MATCHMAKING...", 18.0, theme::TAN_LIGHT)));
-                });
-            c.spawn((theme.label("Esc to cancel", 12.0, theme::TAN_DARK), Node { margin: UiRect::top(Val::Px(12.0)), ..default() }));
+            c.spawn((
+                theme.label(
+                    format!("matchmaking via {}", cfg.signaling_url),
+                    11.0,
+                    theme::TAN_DARK,
+                ),
+                Node {
+                    margin: UiRect::bottom(Val::Px(8.0)),
+                    ..default()
+                },
+            ));
+            c.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn(theme.soldier_icon(32.0));
+                r.spawn((
+                    ConnectingText,
+                    theme.heading_flat("CONNECTING TO MATCHMAKING...", 18.0, theme::TAN_LIGHT),
+                ));
+            });
+            c.spawn((
+                theme.label("Esc to cancel", 12.0, theme::TAN_DARK),
+                Node {
+                    margin: UiRect::top(Val::Px(12.0)),
+                    ..default()
+                },
+            ));
         });
     });
 }
 
 /// Lobby status line: reaching the matchmaking server first, then waiting for the other player
 /// (the WebRTC handshake itself is not observable through matchbox; it ends in the match starting).
-fn connecting_phase(room: Option<Res<RoomConnection>>, mut text: Query<&mut Text, With<ConnectingText>>) {
+fn connecting_phase(
+    room: Option<Res<RoomConnection>>,
+    mut text: Query<&mut Text, With<ConnectingText>>,
+) {
     let Some(room) = room else { return };
     let want = if matches!(room.failure, Some(RoomFailure::Checking)) {
         "CHECKING THE ROOM...".to_string()
@@ -2537,7 +3567,11 @@ fn connecting_screen(
 ) {
     let Some(room) = room else { return };
     // `Checking` is still the waiting panel (with its own status line); the box comes after.
-    let Some(failure) = room.failure.as_ref().filter(|f| !matches!(f, RoomFailure::Checking)) else {
+    let Some(failure) = room
+        .failure
+        .as_ref()
+        .filter(|f| !matches!(f, RoomFailure::Checking))
+    else {
         *shown = false;
         return;
     };
@@ -2550,29 +3584,61 @@ fn connecting_screen(
         commands.entity(e).despawn();
     }
     let (title, hint) = match failure {
-        RoomFailure::Full => ("ERROR: ROOM IS FULL.", "two players are already in this room. Ask the host for a fresh link, or create your own room."),
+        RoomFailure::Full => (
+            "ERROR: ROOM IS FULL.",
+            "two players are already in this room. Ask the host for a fresh link, or create your own room.",
+        ),
         RoomFailure::Refused => (
             "ERROR: COULD NOT JOIN THE ROOM.",
             "the matchmaking server refused the connection. This happens after many attempts in a short time from one network; wait a moment and try again.",
         ),
-        RoomFailure::Unreachable => ("ERROR: CANNOT REACH THE MATCHMAKING SERVER.", "the room was lost; try again once the server is back."),
+        RoomFailure::Unreachable => (
+            "ERROR: CANNOT REACH THE MATCHMAKING SERVER.",
+            "the room was lost; try again once the server is back.",
+        ),
         RoomFailure::Outdated => (
             "ERROR: THIS BUILD IS OUT OF DATE.",
-            if cfg!(target_arch = "wasm32") { "reload the page (Ctrl+Shift+R) to get the current version." } else { "update the client to the current version." },
+            if cfg!(target_arch = "wasm32") {
+                "reload the page (Ctrl+Shift+R) to get the current version."
+            } else {
+                "update the client to the current version."
+            },
         ),
-        RoomFailure::Timeout => ("NOBODY JOINED.", "the room was closed after waiting for an opponent. Create a new one when you are both ready."),
+        RoomFailure::Timeout => (
+            "NOBODY JOINED.",
+            "the room was closed after waiting for an opponent. Create a new one when you are both ready.",
+        ),
         RoomFailure::PeerUnreachable => (
             "ERROR: COULD NOT CONNECT TO THE OPPONENT.",
             "the opponent was found but no connection between your browsers came up. A firewall, VPN or a network that blocks UDP usually causes this; /ice-test.html on this site shows what each side can reach.",
         ),
         RoomFailure::Checking => unreachable!(),
     };
-    let hint = if matches!(failure, RoomFailure::Timeout) { format!("the room was closed after {LOBBY_TIMEOUT_MINUTES} minutes without an opponent. Create a new one when you are both ready.") } else { hint.to_string() };
+    let hint = if matches!(failure, RoomFailure::Timeout) {
+        format!(
+            "the room was closed after {LOBBY_TIMEOUT_MINUTES} minutes without an opponent. Create a new one when you are both ready."
+        )
+    } else {
+        hint.to_string()
+    };
     let root = screen_root(&mut commands, &theme, false);
     commands.entity(root).with_children(|p| {
         p.spawn(panel_column(26.0)).with_children(|c| {
-            c.spawn((theme.heading(title, 26.0, theme::LIGHT_RED), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
-            c.spawn((theme.label(hint, 13.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(12.0)), max_width: Val::Px(520.0), ..default() }));
+            c.spawn((
+                theme.heading(title, 26.0, theme::LIGHT_RED),
+                Node {
+                    margin: UiRect::bottom(Val::Px(6.0)),
+                    ..default()
+                },
+            ));
+            c.spawn((
+                theme.label(hint, 13.0, theme::OFF_WHITE),
+                Node {
+                    margin: UiRect::bottom(Val::Px(12.0)),
+                    max_width: Val::Px(520.0),
+                    ..default()
+                },
+            ));
             c.spawn(theme.button("OK", UiAction::ErrorOk, 160.0, BUTTON_H, 18.0));
         });
     });
@@ -2586,13 +3652,21 @@ fn disabled_tooltips(
     for (interaction, children) in &buttons {
         for child in children.iter() {
             if let Ok(mut vis) = tips.get_mut(child) {
-                *vis = if *interaction == Interaction::None { Visibility::Hidden } else { Visibility::Visible };
+                *vis = if *interaction == Interaction::None {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Visible
+                };
             }
         }
     }
 }
 
-fn leave_room_error(commands: &mut Commands, typed: &mut TypedCode, next: &mut NextState<AppState>) {
+fn leave_room_error(
+    commands: &mut Commands,
+    typed: &mut TypedCode,
+    next: &mut NextState<AppState>,
+) {
     typed.0.clear();
     commands.remove_resource::<RoomConnection>();
     next.set(AppState::Menu);
@@ -2606,7 +3680,11 @@ fn connecting_keys(
     mut typed: ResMut<TypedCode>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    let errored = room.is_some_and(|r| r.failure.as_ref().is_some_and(|f| !matches!(f, RoomFailure::Checking)));
+    let errored = room.is_some_and(|r| {
+        r.failure
+            .as_ref()
+            .is_some_and(|f| !matches!(f, RoomFailure::Checking))
+    });
     let ok = errored && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space));
     if keys.just_pressed(KeyCode::Escape) || ok {
         if errored {

@@ -231,13 +231,30 @@ impl ClientConfig {
         format!("{}/version", http_base(&self.signaling_url))
     }
 
+    /// `http(s)://.../build` of the signaling server: the commit it was built from, compared to
+    /// `endif_sim::BUILD_ID` to notice a newer build whose protocol still matches.
+    pub fn build_url(&self) -> String {
+        format!("{}/build", http_base(&self.signaling_url))
+    }
+
     /// The desktop package for this platform, served by nginx next to the API
     /// (`/download/<platform>`, see `deploy/nginx/endif.tf.conf`). Desktop only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_url(&self) -> String {
-        let platform = if cfg!(windows) { "windows" } else { "linux" };
-        format!("{}/download/{platform}", http_base(&self.signaling_url))
+        format!("{}/download/{}", http_base(&self.signaling_url), Self::PLATFORM)
     }
+
+    /// The build id of the package at [`download_url`](Self::download_url), a text file the
+    /// `downloads` job publishes next to it (`/download/<platform>.version`). The packages go up
+    /// after the server restarts; until this matches the server's build the updater would only
+    /// fetch the old package. Desktop only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn package_version_url(&self) -> String {
+        format!("{}/download/{}.version", http_base(&self.signaling_url), Self::PLATFORM)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    const PLATFORM: &str = if cfg!(windows) { "windows" } else { "linux" };
 
     /// A shareable link (web builds) or the bare code (desktop builds).
     pub fn join_link(&self, code: &str) -> String {
@@ -342,6 +359,7 @@ mod tests {
         cfg.signaling_url = "wss://signal.example.org/".to_string();
         assert_eq!(cfg.api_url(), "https://signal.example.org");
         assert_eq!(cfg.version_url(), "https://signal.example.org/version");
+        assert_eq!(cfg.build_url(), "https://signal.example.org/build");
         cfg.api_override = Some("https://api.example.org/".to_string());
         assert_eq!(cfg.api_url(), "https://api.example.org");
     }

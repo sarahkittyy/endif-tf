@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <script>window.ENDIF_SIGNALING = "__SIGNALING__"; window.ENDIF_PROTOCOL = "__PROTOCOL_ID__";</script>
+  <script>window.ENDIF_SIGNALING = "__SIGNALING__"; window.ENDIF_BUILD = "__BUILD_ID__";</script>
   <script>
     // Clipboard helpers for the game (crates/client/src/webclip.rs). Browsers only allow clipboard
     // access from a user gesture, and the game loop runs from requestAnimationFrame, so copying is
@@ -48,7 +48,7 @@
         const w = window.open(url, "_blank", "noopener");
         if (!w) window.location.assign(url);
       };
-      // Reload for a newer build. Given the server's protocol id it reloads once per id (noted in
+      // Reload for a newer build. Given the server's build id it reloads once per id (noted in
       // sessionStorage), so a deploy in progress, with the page and server briefly out of step,
       // cannot loop the tab; without one it always reloads. Returns whether a reload started.
       window.endifReload = (serverVersion) => {
@@ -557,17 +557,17 @@
       }
     };
     // A tab opened before a deploy runs the previous build. index.html is served no-cache, so one
-    // reload fetches the current one; asking the server first means a stale page never spends the
-    // wasm download. Mirrors crates/client/src/config.rs: the page's signaling URL, or the page's
+    // reload fetches the current one; asking the server (GET /build, the commit it was built from)
+    // first means a stale page never spends the wasm download. Mirrors crates/client/src/config.rs: the page's signaling URL, or the page's
     // own host on the default port, over http(s). Skipped quickly when the server does not answer.
     const checkBuild = async () => {
-      const ours = window.ENDIF_PROTOCOL || "";
+      const ours = window.ENDIF_BUILD || "";
       const configured = params.get("server") || window.ENDIF_SIGNALING || "";
       if (!ours || ours.startsWith("__")) return;
       const signaling = configured && !configured.startsWith("__")
         ? configured
         : `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:3536`;
-      const url = `${signaling.replace(/\/+$/, "").replace(/^ws/, "http")}/version`;
+      const url = `${signaling.replace(/\/+$/, "").replace(/^ws/, "http")}/build`;
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 2500);
       try {
@@ -598,9 +598,9 @@
       const [backend, why] = await pickBackend();
       log(`renderer backend: ${backend} (${why})`);
       try {
-        const { default: init } = await import(`./endif-${backend}.js?v=__BUILD_ID__`);
+        const { default: init } = await import(`./endif-${backend}.js?v=__CACHE_BUST__`);
         log("wasm-bindgen glue loaded, starting init()");
-        await init({ module_or_path: downloadWasm(new URL(`./endif-${backend}_bg.wasm?v=__BUILD_ID__`, import.meta.url), WASM_BYTES[backend]) });
+        await init({ module_or_path: downloadWasm(new URL(`./endif-${backend}_bg.wasm?v=__CACHE_BUST__`, import.meta.url), WASM_BYTES[backend]) });
         started();
       } catch (e) {
         if (`${e}`.includes(CONTROL_FLOW)) {

@@ -24,8 +24,9 @@ pub const NAME_MAX: usize = 20;
 const STORE: &str = "account.json";
 /// How often the queue is polled.
 const QUEUE_POLL_SECS: f64 = 1.5;
-/// How often the main menu asks how many players are online, playing and searching.
-const STATS_POLL_SECS: f64 = 5.0;
+/// How often the main menu asks how many players are online, playing and searching. The counts
+/// should feel live (a friend opening the game shows up within a couple of seconds).
+const STATS_POLL_SECS: f64 = 2.0;
 /// How long the result banner stays up before a finished ranked match returns to the menu.
 const RANKED_EXIT_SECS: f64 = 4.0;
 /// How often the result popup asks the server whether the match has been settled.

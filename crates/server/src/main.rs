@@ -4,7 +4,7 @@
 //! and an idle timeout, `rooms.rs`: clients connect to `ws://host:port/endif-<room-code>` and are
 //! introduced to the other peer in that room; all game traffic then flows peer-to-peer; a socket
 //! to `/presence` joins nothing and only counts the client as online), the `/api` account +
-//! matchmaking HTTP API (`api.rs`) and the `/health` and `/version` probes.
+//! matchmaking HTTP API (`api.rs`) and the `/health`, `/version` and `/build` probes.
 //! Configuration comes from the environment (`.env`, see `config.rs`), accounts and matches live
 //! in MariaDB (`migrations/`, run on startup).
 
@@ -153,11 +153,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "/version",
                     axum::routing::get(move || async move { ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], protocol.clone()) }),
                 )
+                // The commit this server was built from. Clients compare it to their own: a
+                // different one means a newer build exists, even when the protocol still matches.
+                .route(
+                    "/build",
+                    axum::routing::get(|| async { ([(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], endif_sim::BUILD_ID) }),
+                )
                 .nest("/api", api::router(state))
         })
         .build();
 
-    info!("endif server listening on ws://{addr}/<room-code> and http://{addr}/api  (max room size {max_room_size}, protocol {})", endif_sim::protocol_id());
+    info!(
+        "endif server listening on ws://{addr}/<room-code> and http://{addr}/api  (max room size {max_room_size}, protocol {}, build {})",
+        endif_sim::protocol_id(),
+        endif_sim::BUILD_ID
+    );
     if let Err(e) = server.serve().await {
         warn!("server error: {e}");
     }
