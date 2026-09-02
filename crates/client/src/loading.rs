@@ -7,9 +7,10 @@
 //! asset finished when (plus a "still waiting" list every few seconds) so a slow start can be read
 //! off the browser console. Menu music is not waited for: it only starts downloading once the screen
 //! is gone (see `audio.rs`), so it never competes with the assets the screen is waiting on.
-//! `StartupDone` marks that point; on desktop it is inserted right away. No sound at all plays
-//! before it: a match joined from a room link starts under the loading screen, and audio started
-//! while the render warm-up is compiling shaders only crackles.
+//! `StartupDone` marks that point; on desktop it is inserted right away. Joining a room from a
+//! link (`menu.rs`) and playing any sound wait for it: a match must not start, and its countdown
+//! run, under the loading screen, and audio started while the render warm-up is compiling shaders
+//! only crackles.
 
 use bevy::asset::{LoadState, RecursiveDependencyLoadState, UntypedAssetId, UntypedHandle};
 use bevy::prelude::*;

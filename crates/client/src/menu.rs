@@ -5,6 +5,7 @@
 
 use crate::account::{Account, Ending, HistoryEntry, Rating, RankedResult};
 use crate::config::{ClientConfig, ROOM_CODE_LEN, code_from_text, normalize_room_code};
+use crate::loading::StartupDone;
 use crate::net::{LOBBY_TIMEOUT_MINUTES, MatchKind, NetCommand, RoomConnection, RoomFailure, SignalingStatus};
 use crate::settings::{Action, Axis, Binding, Settings, Slider};
 use crate::textfield::{Field, Form, spawn_field};
@@ -270,7 +271,7 @@ impl Plugin for MenuPlugin {
                     paste_shortcut.run_if(in_state(AppState::Menu)),
                     type_code.run_if(in_state(AppState::Menu)),
                     apply_paste.run_if(in_state(AppState::Menu)),
-                    auto_join.run_if(in_state(AppState::Menu)),
+                    auto_join.run_if(in_state(AppState::Menu).and_then(resource_exists::<StartupDone>)),
                     rebuild_ui,
                     wheel_scroll,
                     sync_settings_widgets,
@@ -1818,7 +1819,9 @@ fn apply_paste(mut paste: ResMut<PendingPaste>, mut typed: ResMut<TypedCode>, mu
     }
 }
 
-/// Joins straight away when the app was launched with a room code (`?room=` or `--room`).
+/// Joins when the app was launched with a room code (`?room=` or `--room`). Waits for the web
+/// loading screen to be gone (`StartupDone`) so the match cannot start, and the countdown run,
+/// under it while the assets and the render warm-up are still in progress.
 fn auto_join(mut cfg: ResMut<ClientConfig>, mut cmds: MessageWriter<NetCommand>) {
     if let Some(code) = cfg.initial_room.take()
         && code.len() == ROOM_CODE_LEN
