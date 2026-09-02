@@ -11,6 +11,8 @@ mod config;
 mod copylink;
 mod game;
 mod hud;
+#[cfg(not(target_arch = "wasm32"))]
+mod icon;
 mod loading;
 mod menu;
 mod net;
@@ -20,13 +22,11 @@ mod render;
 mod settings;
 mod textfield;
 mod theme;
+#[cfg(not(target_arch = "wasm32"))]
+mod update;
 mod viewmodel;
 mod warmup;
 mod webclip;
-#[cfg(not(target_arch = "wasm32"))]
-mod update;
-#[cfg(not(target_arch = "wasm32"))]
-mod icon;
 
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::prelude::*;
@@ -109,7 +109,7 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "endif.tf".to_string(),
-                    resolution: WindowResolution::new(1280, 720),
+                    resolution: WindowResolution::new(1420, 800),
                     present_mode: PresentMode::AutoNoVsync,
                     #[cfg(target_arch = "wasm32")]
                     canvas: Some("#endif-canvas".to_string()),
@@ -123,11 +123,17 @@ fn main() {
             })
             // There are no `.meta` files: without this every asset costs an extra request (a 404 on
             // the web, a failed stat on desktop) before the file itself is fetched.
-            .set(AssetPlugin { meta_check: AssetMetaCheck::Never, file_path: ASSET_DIR.to_string(), ..default() })
+            .set(AssetPlugin {
+                meta_check: AssetMetaCheck::Never,
+                file_path: ASSET_DIR.to_string(),
+                ..default()
+            })
             .set(bevy::log::LogPlugin {
                 // matchbox only reports the WebRTC handshake (offers, ICE candidates, connection
                 // states) at debug level; without it a failing peer connection is invisible.
-                filter: "info,wgpu=warn,naga=warn,endif_client=debug,ggrs=info,matchbox_socket=debug".into(),
+                filter:
+                    "info,wgpu=warn,naga=warn,endif_client=debug,ggrs=info,matchbox_socket=debug"
+                        .into(),
                 ..default()
             }),
     )
@@ -146,25 +152,26 @@ fn main() {
     }))
     .insert_resource(settings::Settings::load());
     let cfg = config::ClientConfig::load();
-    app.insert_resource(account::Account::load(cfg.player_name.clone())).insert_resource(cfg)
-    .add_plugins((
-        #[cfg(not(target_arch = "wasm32"))]
-        icon::IconPlugin,
-        assets::GameAssetsPlugin,
-        theme::ThemePlugin,
-        textfield::TextFieldPlugin,
-        account::AccountPlugin,
-        audio::AudioFxPlugin,
-        menu::MenuPlugin,
-        net::NetPlugin,
-        game::GamePlugin,
-        render::RenderPlugin,
-        player_model::PlayerModelPlugin,
-        viewmodel::ViewmodelPlugin,
-        particles::ParticlesPlugin,
-        copylink::CopyLinkPlugin,
-    ))
-    .add_plugins((warmup::WarmupPlugin, hud::HudPlugin, loading::LoadingPlugin));
+    app.insert_resource(account::Account::load(cfg.player_name.clone()))
+        .insert_resource(cfg)
+        .add_plugins((
+            #[cfg(not(target_arch = "wasm32"))]
+            icon::IconPlugin,
+            assets::GameAssetsPlugin,
+            theme::ThemePlugin,
+            textfield::TextFieldPlugin,
+            account::AccountPlugin,
+            audio::AudioFxPlugin,
+            menu::MenuPlugin,
+            net::NetPlugin,
+            game::GamePlugin,
+            render::RenderPlugin,
+            player_model::PlayerModelPlugin,
+            viewmodel::ViewmodelPlugin,
+            particles::ParticlesPlugin,
+            copylink::CopyLinkPlugin,
+        ))
+        .add_plugins((warmup::WarmupPlugin, hud::HudPlugin, loading::LoadingPlugin));
     app.run();
 }
 
@@ -179,7 +186,9 @@ fn prefer_reachable_display() {
     if env::var_os("WINIT_UNIX_BACKEND").is_some() {
         return;
     }
-    let Some(wayland) = env::var("WAYLAND_DISPLAY").ok().filter(|v| !v.is_empty()) else { return };
+    let Some(wayland) = env::var("WAYLAND_DISPLAY").ok().filter(|v| !v.is_empty()) else {
+        return;
+    };
     if env::var("DISPLAY").map(|v| v.is_empty()).unwrap_or(true) {
         return;
     }
@@ -192,7 +201,10 @@ fn prefer_reachable_display() {
         }
     };
     if !socket.exists() {
-        eprintln!("WAYLAND_DISPLAY={wayland} but {} does not exist; using X11 (DISPLAY)", socket.display());
+        eprintln!(
+            "WAYLAND_DISPLAY={wayland} but {} does not exist; using X11 (DISPLAY)",
+            socket.display()
+        );
         // The process is still single-threaded here (before Bevy starts its task pools).
         unsafe { env::remove_var("WAYLAND_DISPLAY") };
     }
