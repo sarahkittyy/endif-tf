@@ -6,7 +6,7 @@
 use crate::game::{PendingFx, RenderStates};
 use crate::loading::StartupDone;
 use crate::menu::UiScreen;
-use crate::net::{LocalHandle, RoomConnection};
+use crate::net::{LocalHandle, MatchKind, RoomConnection};
 use crate::settings::Settings;
 use crate::AppState;
 use bevy::audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, GlobalVolume, PlaybackSettings, Volume};
@@ -160,6 +160,7 @@ impl Plugin for AudioFxPlugin {
             .init_resource::<Delayed>()
             .add_systems(PreUpdate, apply_volume)
             .add_systems(OnEnter(AppState::InGame), (stop_music, match_start.run_if(ready)))
+            .add_systems(OnExit(AppState::InGame), clear_delayed)
             .add_systems(OnEnter(AppState::Connecting), (|mut c: Commands, sfx: Res<Sfx>| play(&mut c, &sfx.join, 0.45)).run_if(ready))
             .add_systems(
                 Update,
@@ -273,16 +274,20 @@ fn room_error_sound(mut commands: Commands, sfx: Res<Sfx>, room: Option<Res<Room
     *played = has_error;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn game_sounds(
     mut commands: Commands,
     sfx: Res<Sfx>,
     fx: Res<PendingFx>,
     local: Res<LocalHandle>,
+    kind: Option<Res<MatchKind>>,
     states: Option<Res<RenderStates>>,
     time: Res<Time<Real>>,
     mut delayed: ResMut<Delayed>,
 ) {
     let Some(states) = states else { return };
+    // A ranked match is one round: the deciding round ends the match instead of starting the next.
+    let ranked = matches!(kind.as_deref(), Some(MatchKind::Ranked(_)));
     let me = local.0 as u8;
     let my_pos = states.cur.players[local.0].origin;
     let now = time.elapsed_secs_f64();
@@ -331,7 +336,9 @@ fn game_sounds(
                     let line = if won { &sfx.announcer_flawless_victory } else { &sfx.announcer_flawless_defeat };
                     delayed.0.push((now + 3.0, pick(line).clone(), 0.9));
                 }
-                delayed.0.push((now + 5.5, sfx.announcer_begin.clone(), 0.85));
+                if !ranked {
+                    delayed.0.push((now + 5.5, sfx.announcer_begin.clone(), 0.85));
+                }
             }
             _ => {}
         }
@@ -345,6 +352,12 @@ fn reload_sound(mut commands: Commands, sfx: Res<Sfx>, local: Res<LocalHandle>, 
     if a.alive && b.alive && a.spawn_tick == b.spawn_tick && b.clip > a.clip {
         play(&mut commands, &sfx.rocket_reload, 0.6);
     }
+}
+
+/// Leaving a match drops the announcer lines still waiting on the round that just ended, so the
+/// "Begin!" queued for the next round does not play over the menu.
+fn clear_delayed(mut delayed: ResMut<Delayed>) {
+    delayed.0.clear();
 }
 
 fn flush_delayed(mut commands: Commands, time: Res<Time<Real>>, mut delayed: ResMut<Delayed>) {
