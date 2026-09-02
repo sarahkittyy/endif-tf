@@ -105,6 +105,9 @@ sed -i.bak "s|__ASSET_DIR__|$ENDIF_ASSET_DIR|g" "$STAGE/index.html"
 sed -i.bak "s|__SIGNALING__|${ENDIF_SIGNALING:-}|" "$STAGE/index.html"
 BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || true)-$(date +%s)"
 sed -i.bak "s|__BUILD_ID__|$BUILD_ID|g" "$STAGE/index.html"
+# The page compares itself to the server's /version before downloading the wasm (index.html).
+PROTOCOL_ID="$(cargo run -q --release -p endif-sim --bin protocol-id)"
+sed -i.bak "s|__PROTOCOL_ID__|$PROTOCOL_ID|g" "$STAGE/index.html"
 rm -f "$STAGE/index.html.bak"
 
 if [ ! -d "dist/$ENDIF_ASSET_DIR" ]; then

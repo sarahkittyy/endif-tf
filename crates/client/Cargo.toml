@@ -39,6 +39,11 @@ getrandom = { version = "0.2", features = ["js"] }
 bevy_ggrs = { version = "0.22", features = ["wasm-bindgen"] }
 ggrs = { version = "0.13", features = ["wasm-bindgen"] }
 
+# Compiles the exe icon in via build.rs; needs rc.exe from the Windows SDK, which the MSVC
+# toolchain and GitHub's windows runners both have.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-compat = "0.2"
 winit = { version = "0.30", default-features = false }

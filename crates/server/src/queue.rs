@@ -122,10 +122,10 @@ fn random_ticket() -> String {
     (0..24).map(|_| rng.gen_range(b'a'..=b'z') as char).collect()
 }
 
-/// Room codes use the client's alphabet (no I, O, 0, 1).
+/// Room codes use the client's alphabet (A-Z and 2-9: no 0 or 1).
 pub fn random_room_code() -> String {
     use rand::Rng;
-    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
     (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
 }

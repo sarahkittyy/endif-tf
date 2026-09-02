@@ -168,6 +168,8 @@ pub enum SignalState {
 #[derive(Resource, Default)]
 pub struct SignalingStatus {
     pub state: SignalState,
+    /// The protocol id the server last reported (the version an update must reach).
+    pub server_version: Option<String>,
     /// The `/version` request in flight and when it was sent.
     probe: Option<(HttpSlot, f64)>,
     next_probe_at: f64,
@@ -309,10 +311,15 @@ fn probe_signaling(
     let new_state = match in_flight {
         Some((Some(Ok((200, body))), _)) => {
             let version = String::from_utf8_lossy(&body).trim().to_string();
+            status.server_version = Some(version.clone());
             if version == endif_sim::protocol_id() {
                 Some(SignalState::Up)
             } else {
                 warn!("server protocol {version} != ours {}: this build is out of date", endif_sim::protocol_id());
+                // Web: the page is stale; one reload fetches the current build (no-op on desktop).
+                if crate::webclip::reload_for_update(Some(&version)) {
+                    info!("reloading the page for the current build");
+                }
                 Some(SignalState::Outdated)
             }
         }

@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <script>window.ENDIF_SIGNALING = "__SIGNALING__";</script>
+  <script>window.ENDIF_SIGNALING = "__SIGNALING__"; window.ENDIF_PROTOCOL = "__PROTOCOL_ID__";</script>
   <script>
     // Clipboard helpers for the game (crates/client/src/webclip.rs). Browsers only allow clipboard
     // access from a user gesture, and the game loop runs from requestAnimationFrame, so copying is
@@ -47,6 +47,19 @@
       window.endifOpen = (url) => {
         const w = window.open(url, "_blank", "noopener");
         if (!w) window.location.assign(url);
+      };
+      // Reload for a newer build. Given the server's protocol id it reloads once per id (noted in
+      // sessionStorage), so a deploy in progress, with the page and server briefly out of step,
+      // cannot loop the tab; without one it always reloads. Returns whether a reload started.
+      window.endifReload = (serverVersion) => {
+        if (serverVersion) {
+          try {
+            if (sessionStorage.getItem("endif-reloaded-for") === serverVersion) return false;
+            sessionStorage.setItem("endif-reloaded-for", serverVersion);
+          } catch (e) { /* storage blocked: reload anyway, the guard is best effort */ }
+        }
+        location.reload();
+        return true;
       };
       window.endifTakePasted = () => {
         const t = pasted;
@@ -543,11 +556,45 @@
         return ["webgl2", `navigator.gpu.requestAdapter() failed: ${e}`];
       }
     };
+    // A tab opened before a deploy runs the previous build. index.html is served no-cache, so one
+    // reload fetches the current one; asking the server first means a stale page never spends the
+    // wasm download. Mirrors crates/client/src/config.rs: the page's signaling URL, or the page's
+    // own host on the default port, over http(s). Skipped quickly when the server does not answer.
+    const checkBuild = async () => {
+      const ours = window.ENDIF_PROTOCOL || "";
+      const configured = params.get("server") || window.ENDIF_SIGNALING || "";
+      if (!ours || ours.startsWith("__")) return;
+      const signaling = configured && !configured.startsWith("__")
+        ? configured
+        : `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:3536`;
+      const url = `${signaling.replace(/\/+$/, "").replace(/^ws/, "http")}/version`;
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 2500);
+      try {
+        const res = await fetch(url, { cache: "no-store", signal: ctl.signal });
+        const theirs = (await res.text()).trim();
+        if (!res.ok || !theirs) {
+          log(`build check skipped: ${url} answered HTTP ${res.status}`);
+        } else if (theirs === ours) {
+          log(`build ${ours} matches the server`);
+        } else if (window.endifReload(theirs)) {
+          log(`server build ${theirs} != this page's ${ours}: reloading for the current build`);
+          await new Promise(() => {});
+        } else {
+          log(`server build ${theirs} != this page's ${ours} after a reload (deploy in progress?); continuing`);
+        }
+      } catch (e) {
+        log(`build check skipped: ${e}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
     const started = () => {
       mark("init");
       log("wasm compiled and instantiated, main() has run; waiting for the engine's first frame");
     };
     (async () => {
+      await checkBuild();
       const [backend, why] = await pickBackend();
       log(`renderer backend: ${backend} (${why})`);
       try {

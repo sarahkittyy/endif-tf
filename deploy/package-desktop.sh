@@ -8,12 +8,14 @@ mkdir -p "$stage"
 
 case "$platform" in
   windows)
-    cargo build --release -p endif-client
+    cargo build --release -p endif-client -p endif-updater
     cp target/release/endif-client.exe "$stage/endif.exe"
+    cp target/release/endif-updater.exe "$stage/endif-updater.exe"
     ;;
   linux)
-    cargo build --release -p endif-client
+    cargo build --release -p endif-client -p endif-updater
     cp target/release/endif-client "$stage/endif"
+    cp target/release/endif-updater "$stage/endif-updater"
     ;;
   *)
     echo "usage: $0 windows|linux" >&2
@@ -27,6 +29,8 @@ endif.tf - desktop build
 ========================
 Windows: SmartScreen may warn about an unknown publisher: "More info" > "Run anyway".
 Linux:   x86_64, needs glibc 2.35 or newer (Ubuntu 22.04+).
+Updates: the game offers "update now" when the server has moved on; endif-updater
+         fetches the current package into this folder and restarts the game.
 
 Source: https://github.com/sarahkittyy/endif-tf
 TXT

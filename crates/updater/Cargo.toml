@@ -1,0 +1,13 @@
+[package]
+name = "endif-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Replaces a desktop install of endif with the current build from the site, then relaunches it"
+
+[dependencies]
+# Same HTTP stack the client already builds (ehttp uses ureq on desktop): rustls, no OpenSSL.
+ureq = "3"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+tar = "0.4"
+flate2 = "1"

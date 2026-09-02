@@ -20,6 +20,8 @@ mod viewmodel;
 mod warmup;
 mod webclip;
 #[cfg(not(target_arch = "wasm32"))]
+mod update;
+#[cfg(not(target_arch = "wasm32"))]
 mod icon;
 
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
@@ -49,6 +51,13 @@ const ASSET_DIR: &str = match option_env!("ENDIF_ASSET_DIR") {
 };
 
 fn main() {
+    // `endif --protocol` prints the protocol identity and exits: the updater asks a freshly
+    // downloaded build this before installing it.
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::args().any(|a| a == "--protocol") {
+        println!("{}", endif_sim::protocol_id());
+        return;
+    }
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
     #[cfg(target_os = "linux")]

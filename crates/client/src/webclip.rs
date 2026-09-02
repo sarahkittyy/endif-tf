@@ -76,6 +76,22 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Web: reloads the page to pick up the current build. With a server version, it reloads once per
+/// version (a `sessionStorage` note) so a deploy in progress, where the page and the server are
+/// briefly out of step, cannot loop the tab; `None` always reloads. Returns whether a reload was
+/// started. Always false on desktop.
+pub fn reload_for_update(server_version: Option<&str>) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js::reload(server_version).unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = server_version;
+        false
+    }
+}
+
 /// Tells the page whether a match is running, so closing the tab asks first (web only).
 pub fn set_in_match(on: bool) {
     #[cfg(target_arch = "wasm32")]
@@ -128,6 +144,8 @@ mod js {
         pub fn take_pasted() -> Result<Option<String>, JsValue>;
         #[wasm_bindgen(catch, js_namespace = window, js_name = endifOpen)]
         pub fn open_url(url: &str) -> Result<(), JsValue>;
+        #[wasm_bindgen(catch, js_namespace = window, js_name = endifReload)]
+        pub fn reload(server_version: Option<&str>) -> Result<bool, JsValue>;
         #[wasm_bindgen(catch, js_namespace = window, js_name = endifSetInMatch)]
         pub fn set_in_match(on: bool) -> Result<(), JsValue>;
         #[wasm_bindgen(catch, js_namespace = window, js_name = endifSetFullscreenOnPlay)]

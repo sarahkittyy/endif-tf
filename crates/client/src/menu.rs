@@ -145,6 +145,8 @@ enum UiAction {
     OpenDownload,
     /// Fetch a desktop build (opens `/download/<platform>` in a new tab).
     Download(Platform),
+    /// This build is out of date: reload the page (web) or hand off to the updater (desktop).
+    Update,
 }
 
 impl UiAction {
@@ -591,6 +593,19 @@ fn rebuild_ui(
     }
 }
 
+/// Top of the main panel while this build is out of date: what happens and the button that does it.
+fn update_banner(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme) {
+    let (hint, label) = if cfg!(target_arch = "wasm32") {
+        ("the page reloads to fetch it.", "Reload")
+    } else {
+        ("the update downloads and restarts the game.", "Update now")
+    };
+    c.spawn(theme.heading_flat("A NEW VERSION IS AVAILABLE", 16.0, theme::LIGHT_RED));
+    c.spawn((theme.label(hint, 12.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(4.0)), ..default() }));
+    c.spawn(button(theme, label, UiAction::Update));
+    c.spawn((theme.label("", 4.0, theme::OFF_WHITE), Node { margin: UiRect::bottom(Val::Px(6.0)), ..default() }));
+}
+
 /// A tan button, greyed out with a hover tooltip when `disabled`. Returns the button entity.
 fn online_button(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, label: &str, action: UiAction, disabled: Option<&str>) -> Entity {
     let mut e = c.spawn(button(theme, label, action));
@@ -698,6 +713,9 @@ fn spawn_main(commands: &mut Commands, theme: &Theme, typed: &TypedCode, s: &Set
         }
 
         p.spawn(panel_column(18.0)).with_children(|c| {
+            if status.is_outdated() {
+                update_banner(c, theme);
+            }
             let find = online_button(c, theme, "Find game", UiAction::FindGame, ranked_offline);
             // A second, smaller text inside the button, right after the label.
             c.commands().entity(find).with_child((
@@ -1308,6 +1326,11 @@ struct MenuCtx<'w, 's> {
     form: ResMut<'w, Form>,
     cfg: Res<'w, ClientConfig>,
     time: Res<'w, Time<Real>>,
+    /// Both only read by the desktop update path.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    status: Res<'w, SignalingStatus>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    exit: MessageWriter<'w, AppExit>,
 }
 
 fn ui_buttons(
@@ -1490,6 +1513,26 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
         }
         UiAction::OpenDownload => *ctx.screen = UiScreen::Download,
         UiAction::Download(platform) => crate::webclip::open_url(&platform.url()),
+        UiAction::Update => {
+            #[cfg(target_arch = "wasm32")]
+            {
+                crate::webclip::reload_for_update(None);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                match crate::update::launch_updater(&ctx.cfg, ctx.status.server_version.as_deref().unwrap_or("")) {
+                    Ok(()) => {
+                        info!("updater started; quitting");
+                        ctx.exit.write(AppExit::Success);
+                    }
+                    Err(e) => {
+                        warn!("{e}");
+                        ctx.account.error = Some(e);
+                        ctx.refresh.0 = true;
+                    }
+                }
+            }
+        }
         UiAction::SubmitLogin
         | UiAction::SubmitRegister
         | UiAction::SubmitVerify

@@ -64,7 +64,9 @@ fn derived_signaling() -> Option<String> {
     let scheme = if loc.protocol().ok()? == "https:" { "wss" } else { "ws" };
     Some(format!("{scheme}://{host}:{DEFAULT_SIGNALING_PORT}"))
 }
-const ROOM_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+/// Every capital letter plus 2-9: the menu font keeps I/O distinct, and leaving 0 and 1 out means
+/// a round or vertical glyph can only be O or I.
+const ROOM_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
 pub const ROOM_CODE_LEN: usize = 6;
 
 /// `http(s)://host:port` of a `ws(s)://` URL.
@@ -217,6 +219,14 @@ impl ClientConfig {
         format!("{}/version", http_base(&self.signaling_url))
     }
 
+    /// The desktop package for this platform, served by nginx next to the API
+    /// (`/download/<platform>`, see `deploy/nginx/endif.tf.conf`). Desktop only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn download_url(&self) -> String {
+        let platform = if cfg!(windows) { "windows" } else { "linux" };
+        format!("{}/download/{platform}", http_base(&self.signaling_url))
+    }
+
     /// A shareable link (web builds) or the bare code (desktop builds).
     pub fn join_link(&self, code: &str) -> String {
         #[cfg(target_arch = "wasm32")]
@@ -271,7 +281,7 @@ fn parse_query(search: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Uppercase and drop characters that are not in the room alphabet (codes never contain I, O, 0 or 1).
+/// Uppercase and drop characters that are not in the room alphabet (codes never contain 0 or 1).
 pub fn normalize_room_code(s: impl AsRef<str>) -> String {
     s.as_ref()
         .chars()
@@ -316,7 +326,8 @@ mod tests {
     #[test]
     fn normalizer_keeps_valid_letters_verbatim() {
         assert_eq!(normalize_room_code("lkjq"), "LKJQ");
-        assert_eq!(normalize_room_code("a-b c1o"), "ABC");
+        assert_eq!(normalize_room_code("a-b c1o0"), "ABCO");
+        assert_eq!(normalize_room_code("il1"), "IL");
         assert_eq!(normalize_room_code("ABCDEFGH"), "ABCDEF");
     }
 }
