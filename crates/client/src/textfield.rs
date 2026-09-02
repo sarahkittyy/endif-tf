@@ -26,11 +26,13 @@ pub enum Field {
     Code,
     /// The name used while not logged in.
     AnonName,
+    /// Opponent filter above the profile's match history.
+    HistorySearch,
 }
 
 impl Field {
     /// Tab order.
-    pub const ALL: [Field; 9] = [
+    pub const ALL: [Field; 10] = [
         Field::Login,
         Field::Email,
         Field::Username,
@@ -40,6 +42,7 @@ impl Field {
         Field::Password2,
         Field::Code,
         Field::AnonName,
+        Field::HistorySearch,
     ];
 
     pub fn masked(self) -> bool {
@@ -50,7 +53,7 @@ impl Field {
         match self {
             Field::Code => 6,
             Field::AnonName => crate::account::NAME_MAX,
-            Field::Username | Field::NewUsername => 20,
+            Field::Username | Field::NewUsername | Field::HistorySearch => 20,
             Field::Login | Field::Email => 254,
             _ => 128,
         }

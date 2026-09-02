@@ -95,6 +95,13 @@ pub struct ClientConfig {
     pub screenshot: Option<String>,
     /// Dev: exit after this many seconds.
     pub quit_after: Option<f64>,
+    /// `--netstats` / `?netstats=true`: the network statistics overlay in matches. The web flag
+    /// holds for the life of the page: it is read once here, and `forget_join_in_url` leaves it in
+    /// the address, so it only goes away with a reload without it.
+    pub netstats: bool,
+    /// Dev builds only (`netsim` feature): impair the connection to the peer, see `netsim.rs`.
+    #[cfg(feature = "netsim")]
+    pub netsim: Option<crate::netsim::NetSim>,
 }
 
 impl ClientConfig {
@@ -118,6 +125,9 @@ impl ClientConfig {
             auto_practice: false,
             screenshot: None,
             quit_after: None,
+            netstats: false,
+            #[cfg(feature = "netsim")]
+            netsim: None,
         };
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -152,6 +162,9 @@ impl ClientConfig {
                     "--practice" => cfg.auto_practice = true,
                     "--screenshot" => cfg.screenshot = args.next(),
                     "--quit-after" => cfg.quit_after = args.next().and_then(|v| v.parse().ok()),
+                    "--netstats" => cfg.netstats = true,
+                    #[cfg(feature = "netsim")]
+                    "--netsim" => cfg.netsim = args.next().and_then(|v| crate::netsim::NetSim::parse(&v)),
                     _ => {}
                 }
             }
@@ -168,6 +181,9 @@ impl ClientConfig {
                         "api" => cfg.api_override = Some(v),
                         "ice" => cfg.ice = v,
                         "name" => cfg.player_name = Some(v),
+                        "netstats" => cfg.netstats = !matches!(v.as_str(), "false" | "0" | "no"),
+                        #[cfg(feature = "netsim")]
+                        "netsim" => cfg.netsim = crate::netsim::NetSim::parse(&v),
                         _ => {}
                     }
                 }

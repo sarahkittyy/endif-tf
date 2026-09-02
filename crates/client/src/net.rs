@@ -22,8 +22,10 @@ pub type Config = GgrsConfig<PlayerInput, PeerId>;
 /// Frame rate GGRS advances the simulation at. TF2 ticks at 66.67 Hz; GGRS needs an integer, so
 /// 67 (0.5% fast) is used rather than 66 (1% slow).
 pub const ROLLBACK_FPS: usize = 67;
-pub const INPUT_DELAY: usize = 2;
-pub const MAX_PREDICTION: usize = 12;
+/// Frames GGRS may run ahead of the peer's last known input before it stops and waits: about
+/// 240 ms of one-way latency (plus the peer's input delay) before a stall. A re-simulation of
+/// that many frames is cheap for this simulation. `game::FX_HISTORY` follows it.
+pub const MAX_PREDICTION: usize = 16;
 /// Silence from the peer GGRS tolerates before it drops the match. A browser client can stall for
 /// several seconds on its first match (see `warmup.rs`); GGRS's 2 s default turned that into a
 /// disconnect for both players. A peer that really went away is noticed sooner through matchbox's
@@ -360,20 +362,68 @@ pub enum NetCommand {
     Leave,
 }
 
-/// Adapter that lets GGRS talk over a matchbox channel.
-pub struct GgrsChannel(pub WebRtcChannel);
+/// Adapter that lets GGRS talk over a matchbox channel. Dev builds can put the `netsim`
+/// impairment between the two.
+pub struct GgrsChannel {
+    chan: WebRtcChannel,
+    #[cfg(feature = "netsim")]
+    sim: Option<crate::netsim::Impaired>,
+}
 
-impl bevy_ggrs::ggrs::NonBlockingSocket<PeerId> for GgrsChannel {
-    fn send_to(&mut self, msg: &bevy_ggrs::ggrs::Message, addr: &PeerId) {
-        match bincode::serialize(msg) {
-            Ok(bytes) => self.0.send(bytes.into_boxed_slice(), *addr),
-            Err(e) => warn!("failed to serialize ggrs message: {e}"),
+impl GgrsChannel {
+    fn new(chan: WebRtcChannel, cfg: &ClientConfig) -> Self {
+        #[cfg(not(feature = "netsim"))]
+        let _ = cfg;
+        GgrsChannel {
+            chan,
+            #[cfg(feature = "netsim")]
+            sim: cfg.netsim.map(crate::netsim::Impaired::new),
         }
     }
 
+    /// Sends whatever the impairment has released so far (dev builds).
+    fn flush(&mut self) {
+        #[cfg(feature = "netsim")]
+        if let Some(sim) = &mut self.sim {
+            for (peer, packet) in sim.out.drain_due() {
+                self.chan.send(packet, peer);
+            }
+        }
+    }
+}
+
+impl bevy_ggrs::ggrs::NonBlockingSocket<PeerId> for GgrsChannel {
+    fn send_to(&mut self, msg: &bevy_ggrs::ggrs::Message, addr: &PeerId) {
+        let bytes = match bincode::serialize(msg) {
+            Ok(bytes) => bytes.into_boxed_slice(),
+            Err(e) => {
+                warn!("failed to serialize ggrs message: {e}");
+                return;
+            }
+        };
+        #[cfg(feature = "netsim")]
+        if let Some(sim) = &mut self.sim {
+            sim.out.push(*addr, bytes);
+            self.flush();
+            return;
+        }
+        self.chan.send(bytes, *addr);
+    }
+
     fn receive_all_messages(&mut self) -> Vec<(PeerId, bevy_ggrs::ggrs::Message)> {
-        self.0
-            .receive()
+        self.flush();
+        let packets = self.chan.receive();
+        #[cfg(feature = "netsim")]
+        let packets = match &mut self.sim {
+            Some(sim) => {
+                for (peer, packet) in packets {
+                    sim.inp.push(peer, packet);
+                }
+                sim.inp.drain_due()
+            }
+            None => packets,
+        };
+        packets
             .into_iter()
             .filter_map(|(peer, packet)| match bincode::deserialize(&packet) {
                 Ok(msg) => Some((peer, msg)),
@@ -649,8 +699,10 @@ fn poll_room(
     cfg: Res<ClientConfig>,
     kind: Option<Res<MatchKind>>,
     account: Res<crate::account::Account>,
+    settings: Res<crate::settings::Settings>,
     time: Res<Time<Real>>,
     mut names: ResMut<PlayerNames>,
+    mut netstats: ResMut<crate::netstats::NetStats>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(mut room) = room else { return };
@@ -729,12 +781,13 @@ fn poll_room(
     ids.push(our_id);
     ids.sort();
 
+    let input_delay = crate::netstats::initial_input_delay(&settings);
     let mut builder = SessionBuilder::<Config>::new()
         .with_num_players(2)
         .expect("num players")
         .with_fps(ROLLBACK_FPS)
         .expect("fps")
-        .with_input_delay(INPUT_DELAY)
+        .with_input_delay(input_delay as usize)
         .with_max_prediction_window(MAX_PREDICTION)
         .with_disconnect_timeout(DISCONNECT_TIMEOUT)
         .with_disconnect_notify_delay(DISCONNECT_NOTIFY_START)
@@ -773,9 +826,10 @@ fn poll_room(
         }
     };
 
-    match builder.start_p2p_session(GgrsChannel(channel)) {
+    match builder.start_p2p_session(GgrsChannel::new(channel, &cfg)) {
         Ok(session) => {
-            info!("starting p2p session as player {local_handle}");
+            info!("starting p2p session as player {local_handle} with input delay {input_delay}");
+            netstats.input_delay = input_delay;
             commands.insert_resource(PendingSession(Some(Session::P2P(session))));
             commands.insert_resource(LocalHandle(local_handle));
             room.started = true;
@@ -798,6 +852,8 @@ fn watch_session(
     mut exit: ResMut<MatchExit>,
     mut next: ResMut<NextState<AppState>>,
     mut status: ResMut<crate::hud::NetStatus>,
+    mut netstats: ResMut<crate::netstats::NetStats>,
+    time: Res<Time<Real>>,
 ) {
     // matchbox reports the WebRTC connection itself going away (tab closed, ICE failed) without
     // waiting out the GGRS silence timeout. Errors here mean the signaling connection is gone,
@@ -834,6 +890,7 @@ fn watch_session(
         {
             status.ping_ms = stats.ping as u32;
             status.frames_ahead = s.frames_ahead();
+            netstats.record_stats(&stats, s.frames_ahead(), time.elapsed_secs_f64());
         }
         for ev in s.events() {
             match ev {
@@ -844,6 +901,7 @@ fn watch_session(
                 GgrsEvent::Synchronized { .. } => {
                     info!("ggrs synchronized");
                     status.text = "connected".to_string();
+                    netstats.synced = true;
                 }
                 GgrsEvent::NetworkInterrupted { disconnect_timeout, .. } => {
                     warn!("nothing from the peer for {DISCONNECT_NOTIFY_START:?}; dropping them in {disconnect_timeout} ms");

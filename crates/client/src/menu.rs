@@ -109,6 +109,12 @@ struct LeaderboardTable;
 #[derive(Resource, Default)]
 struct LeaderboardRows(Option<u32>);
 
+/// What the profile's match history shows: competitive matches only, or every round.
+#[derive(Resource, Default)]
+struct HistoryFilter {
+    comp_only: bool,
+}
+
 /// Waiting for the next key/mouse press to bind this action.
 #[derive(Resource, Default)]
 pub struct Listening(pub Option<Action>);
@@ -147,6 +153,8 @@ enum UiAction {
     /// Web only: go fullscreen on the click that starts play.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Fullscreen,
+    /// Let the game pick the input delay from the connection.
+    AdaptiveDelay,
     /// Dismiss the "room is full" error: back to the menu with the code cleared.
     ErrorOk,
     /// Dismiss the result popup of a finished ranked match.
@@ -185,6 +193,8 @@ enum UiAction {
     OpenTab(Tab),
     /// Another page of the leaderboard (from 1).
     LeaderboardPage(u32),
+    /// The COMP / ALL switch above the match history.
+    HistoryFilter,
 }
 
 impl UiAction {
@@ -197,6 +207,8 @@ impl UiAction {
             UiAction::InvertY
             | UiAction::SeparateSensitivity
             | UiAction::Fullscreen
+            | UiAction::AdaptiveDelay
+            | UiAction::HistoryFilter
             | UiAction::OpenTab(_) => ButtonStyle::Custom,
             _ => ButtonStyle::Plain,
         }
@@ -280,7 +292,7 @@ const TAB_GAP: f32 = 3.0;
 const TAB_TOP: f32 = 18.0;
 const TAB_ICON: f32 = 28.0;
 /// The panel's border (`theme::panel`), which the selected tab lies over.
-const PANEL_BORDER: f32 = 2.0;
+const PANEL_BORDER: f32 = theme::PANEL_BORDER;
 /// Brightening of a tab's artwork under the mouse.
 const TAB_HOVER_TINT: Color = Color::srgb(1.25, 1.25, 1.25);
 
@@ -364,6 +376,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<ReturnScreen>()
             .init_resource::<TitlePanelSize>()
             .init_resource::<LeaderboardRows>()
+            .init_resource::<HistoryFilter>()
             .add_systems(OnEnter(AppState::Menu), enter_menu)
             .add_systems(OnExit(AppState::Menu), leave_menu)
             .add_systems(OnEnter(AppState::InGame), |mut s: ResMut<UiScreen>| {
@@ -391,6 +404,7 @@ impl Plugin for MenuPlugin {
                     apply_paste.run_if(in_state(AppState::Menu)),
                     auto_join
                         .run_if(in_state(AppState::Menu).and_then(resource_exists::<StartupDone>)),
+                    history_search,
                     rebuild_ui,
                     wheel_scroll,
                     sync_settings_widgets,
@@ -658,9 +672,11 @@ fn slider_controls(
         }),
     ))
     .with_children(|b| {
+        // "8 (133 ms)" is too long for the box at the usual size.
+        let size = if slider == Slider::InputDelay { 12.0 } else { 16.0 };
         b.spawn((
             ValueText(axis),
-            theme.heading_flat(slider.display(s), 16.0, theme::YELLOW),
+            theme.heading_flat(slider.display(s), size, theme::YELLOW),
             no_wrap(),
         ));
     });
@@ -692,8 +708,8 @@ fn toggle_cell(theme: &Theme, text: &str, active: bool) -> impl Bundle {
     )
 }
 
-/// YES / NO switch; the active half is lit.
-fn toggle(theme: &Theme, on: bool, action: UiAction) -> impl Bundle {
+/// Two-way switch; the active half is lit. `first` picks the left label.
+fn switch(theme: &Theme, labels: [&str; 2], first: bool, action: UiAction) -> impl Bundle {
     (
         Button,
         action,
@@ -708,8 +724,16 @@ fn toggle(theme: &Theme, on: bool, action: UiAction) -> impl Bundle {
         },
         BackgroundColor(theme::INSET_BG),
         BorderColor::all(theme::TAN_DARKER),
-        children![toggle_cell(theme, "YES", on), toggle_cell(theme, "NO", !on)],
+        children![
+            toggle_cell(theme, labels[0], first),
+            toggle_cell(theme, labels[1], !first)
+        ],
     )
+}
+
+/// YES / NO switch.
+fn toggle(theme: &Theme, on: bool, action: UiAction) -> impl Bundle {
+    switch(theme, ["YES", "NO"], on, action)
 }
 
 // ------------------------------------------------------------------------------------ screens
@@ -719,6 +743,23 @@ fn toggle(theme: &Theme, on: bool, action: UiAction) -> impl Bundle {
 struct RebuildExtras<'w> {
     cfg: Res<'w, ClientConfig>,
     panel_size: Res<'w, TitlePanelSize>,
+    history: Res<'w, HistoryFilter>,
+}
+
+/// Rebuilds the profile while the opponent search is typed in, so the list follows the text.
+fn history_search(
+    screen: Res<UiScreen>,
+    form: Res<Form>,
+    mut refresh: ResMut<UiRefresh>,
+    mut last: Local<String>,
+) {
+    let query = form.get(Field::HistorySearch);
+    if *last != query {
+        *last = query.to_string();
+        if *screen == UiScreen::Profile {
+            refresh.0 = true;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -801,7 +842,14 @@ fn rebuild_ui(
         UiScreen::Verify => spawn_verify(&mut commands, &theme, &account, &form, now),
         UiScreen::Forgot => spawn_forgot(&mut commands, &theme, &account, &form),
         UiScreen::Reset => spawn_reset(&mut commands, &theme, &account, &form, now),
-        UiScreen::Profile => spawn_profile(&mut commands, &theme, &account, scroll),
+        UiScreen::Profile => spawn_profile(
+            &mut commands,
+            &theme,
+            &account,
+            &form,
+            &extra.history,
+            scroll,
+        ),
         UiScreen::ChangeUsername => spawn_change_username(&mut commands, &theme, &account, &form),
         UiScreen::ChangePassword => spawn_change_password(&mut commands, &theme, &account, &form),
         UiScreen::Queue => spawn_queue(&mut commands, &theme, &account, &extra.cfg),
@@ -1146,7 +1194,56 @@ fn title_screen(commands: &mut Commands, theme: &Theme, account: &Account, form:
 /// Insets resolve inside the border: at `left: 100%` a tab starts on the inner edge of the
 /// panel's right border, so the selected one lies over that border and the panel opens into
 /// it; the others step past it and keep the border between them and the panel.
+///
+/// The panel's own right border is left out and redrawn in two pieces, above and below the
+/// selected tab: the tab is as see-through as the panel, and the opaque border under it would
+/// show through as a faint line. The panel's background stops at the border, so what is under
+/// the tab in the gap is the backdrop, the same as under the rest of it.
 fn spawn_tabs(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, selected: Tab) {
+    let panel = c.target_entity();
+    c.commands().entity(panel).insert(BorderColor {
+        right: Color::NONE,
+        ..BorderColor::all(theme::TAN_DARK)
+    });
+    let sel = Tab::ALL.iter().position(|&t| t == selected).unwrap_or(0) as f32;
+    let gap_top = TAB_TOP + sel * (TAB_H + TAB_GAP);
+    // A piece's border thins to nothing over its last `PANEL_BORDER` rows, where its bare end
+    // is the nearer edge; each runs that far past the gap, under the tab's own opaque border.
+    // Widths keep the far edge out of that reckoning and fit the corner's curve.
+    let piece = |top: Val, bottom: Val, height: Val, radius: BorderRadius, border: UiRect| {
+        (
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(-PANEL_BORDER),
+                width: Val::Px(2.0 * theme::PANEL_RADIUS),
+                top,
+                bottom,
+                height,
+                border,
+                border_radius: radius,
+                ..default()
+            },
+            BorderColor {
+                right: theme::TAN_DARK,
+                ..BorderColor::all(Color::NONE)
+            },
+        )
+    };
+    let b = Val::Px(PANEL_BORDER);
+    c.spawn(piece(
+        Val::Px(-PANEL_BORDER),
+        Val::Auto,
+        Val::Px(PANEL_BORDER + gap_top + PANEL_BORDER),
+        BorderRadius::top_right(Val::Px(theme::PANEL_RADIUS)),
+        UiRect { top: b, right: b, ..UiRect::ZERO },
+    ));
+    c.spawn(piece(
+        Val::Px(gap_top + TAB_H - PANEL_BORDER),
+        Val::Px(-PANEL_BORDER),
+        Val::Auto,
+        BorderRadius::bottom_right(Val::Px(theme::PANEL_RADIUS)),
+        UiRect { bottom: b, right: b, ..UiRect::ZERO },
+    ));
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         let on = tab == selected;
         let (image, icon, rest, hover) = match tab {
@@ -1345,13 +1442,16 @@ fn spawn_main(
                         ..default()
                     }))
                     .with_children(|b| {
+                        // Six of the widest glyph (`W W W W W W`) must still fit on one line: the
+                        // box is ~238 px wide, and wrapping would break the code across two rows.
                         b.spawn((
                             CodeField,
                             theme.heading_flat(
                                 code_display(&typed.0, ROOM_CODE_LEN),
-                                34.0,
+                                30.0,
                                 theme::YELLOW,
                             ),
+                            no_wrap(),
                         ));
                     });
                     r.spawn(small_button(theme, "paste", UiAction::Paste));
@@ -1870,6 +1970,15 @@ fn spawn_settings(
                     slider_controls(b, theme, s, Slider::Volume, SLIDER_W)
                 });
 
+                c.spawn(section(theme, "network"));
+                row(c, theme, "Adaptive input delay", |b| {
+                    b.spawn(toggle(theme, s.adaptive_delay, UiAction::AdaptiveDelay));
+                });
+                if !s.adaptive_delay {
+                    row(c, theme, "Input delay", |b| {
+                        slider_controls(b, theme, s, Slider::InputDelay, SLIDER_W)
+                    });
+                }
                 if cfg!(target_arch = "wasm32") {
                     c.spawn(section(theme, "video"));
                     row(c, theme, "Fullscreen on play", |b| {
@@ -2252,6 +2361,15 @@ fn cell(
     });
 }
 
+/// Fuzzy name match: every character of `query` appears in `name`, in order, ignoring case.
+fn fuzzy(name: &str, query: &str) -> bool {
+    let mut chars = name.chars().flat_map(char::to_lowercase);
+    query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|q| chars.any(|c| c == q))
+}
+
 /// One line of the match history.
 fn history_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, m: &HistoryEntry) {
     let (result, color) = if m.won {
@@ -2336,8 +2454,16 @@ fn history_row(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, m: &Histo
     });
 }
 
-fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scroll: Vec2) {
+fn spawn_profile(
+    commands: &mut Commands,
+    theme: &Theme,
+    account: &Account,
+    form: &Form,
+    filter: &HistoryFilter,
+    scroll: Vec2,
+) {
     let root = screen_root(commands, theme, false);
+    let query = form.get(Field::HistorySearch).trim().to_string();
     let user = account
         .profile
         .as_ref()
@@ -2409,7 +2535,35 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
                 r.spawn((theme.label(rate, 15.0, theme::OFF_WHITE), no_wrap()));
             });
 
-            c.spawn(section(theme, "match history"));
+            // The section title, with the opponent search and the COMP / ALL switch on its right.
+            c.spawn(Node {
+                width: Val::Px(ROW_W),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(10.0), Val::Px(2.0)),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn((
+                    theme.heading_flat("MATCH HISTORY", 20.0, theme::ORANGE),
+                    no_wrap(),
+                ));
+                r.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(12.0),
+                    ..default()
+                })
+                .with_children(|x| {
+                    spawn_field(x, theme, form, Field::HistorySearch, "search opponent", 200.0);
+                    x.spawn(switch(
+                        theme,
+                        ["COMP", "ALL"],
+                        filter.comp_only,
+                        UiAction::HistoryFilter,
+                    ));
+                });
+            });
             c.spawn((
                 theme::inset(Node {
                     width: Val::Px(ROW_W),
@@ -2440,7 +2594,27 @@ fn spawn_profile(commands: &mut Commands, theme: &Theme, account: &Account, scro
                     ));
                 }
                 Some(profile) => {
-                    for m in &profile.matches {
+                    let shown: Vec<&HistoryEntry> = profile
+                        .matches
+                        .iter()
+                        .filter(|m| !filter.comp_only || m.ranked)
+                        .filter(|m| fuzzy(&m.opponent, &query))
+                        .collect();
+                    if shown.is_empty() {
+                        let msg = if query.is_empty() {
+                            "no competitive matches yet".to_string()
+                        } else {
+                            format!("no matches against \"{query}\"")
+                        };
+                        list.spawn((
+                            theme.label(msg, 14.0, theme::TAN_DARK),
+                            Node {
+                                margin: UiRect::vertical(Val::Px(12.0)),
+                                ..default()
+                            },
+                        ));
+                    }
+                    for m in shown {
                         history_row(list, theme, m);
                     }
                 }
@@ -2675,6 +2849,7 @@ struct MenuCtx<'w, 's> {
     cfg: Res<'w, ClientConfig>,
     time: Res<'w, Time<Real>>,
     lb_rows: Res<'w, LeaderboardRows>,
+    history: ResMut<'w, HistoryFilter>,
     /// Both only read by the desktop update path.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     status: Res<'w, SignalingStatus>,
@@ -2789,6 +2964,10 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
             ctx.refresh.0 = true;
         }
         UiAction::Paste => ctx.paste.0 = crate::webclip::request_paste(&mut ctx.clipboard),
+        UiAction::HistoryFilter => {
+            ctx.history.comp_only = !ctx.history.comp_only;
+            ctx.refresh.0 = true;
+        }
         UiAction::InvertY => {
             ctx.settings.invert_y = !ctx.settings.invert_y;
             ctx.settings.save();
@@ -2796,6 +2975,12 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
         }
         UiAction::Fullscreen => {
             ctx.settings.fullscreen = !ctx.settings.fullscreen;
+            ctx.settings.save();
+            ctx.refresh.0 = true;
+        }
+        UiAction::AdaptiveDelay => {
+            commit_edit(&mut ctx.editing, &mut ctx.settings);
+            ctx.settings.adaptive_delay = !ctx.settings.adaptive_delay;
             ctx.settings.save();
             ctx.refresh.0 = true;
         }
@@ -2855,6 +3040,7 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
             ctx.account.error = None;
             ctx.account.notice = None;
             ctx.account.profile = None;
+            ctx.form.clear(Field::HistorySearch);
             let name = ctx.account.display_name();
             ctx.account.fetch_profile(&ctx.cfg, &name);
             *ctx.screen = UiScreen::Profile;
@@ -3483,10 +3669,13 @@ fn setup_connecting(
                         ..default()
                     }))
                     .with_children(|b| {
-                        b.spawn(theme.heading(
-                            code_display(&code, ROOM_CODE_LEN),
-                            64.0,
-                            theme::YELLOW,
+                        b.spawn((
+                            theme.heading(
+                                code_display(&code, ROOM_CODE_LEN),
+                                64.0,
+                                theme::YELLOW,
+                            ),
+                            no_wrap(),
                         ));
                     });
                     c.spawn(theme.label(

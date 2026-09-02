@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 pub const DEGREES_PER_COUNT: f32 = 0.022;
 pub const SENS_MIN: f32 = 0.1;
 pub const SENS_MAX: f32 = 10.0;
+/// Frames of input delay a player may pick by hand (0 = the tick you press it on).
+pub const INPUT_DELAY_MAX: u8 = 8;
+/// Input delay adaptive mode starts from (and the manual default), in frames.
+pub const INPUT_DELAY_DEFAULT: u8 = 2;
 
 /// Game actions that can be bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,6 +224,8 @@ pub enum Slider {
     Sens(Axis),
     /// Master volume, 0..1 (shown as a percentage).
     Volume,
+    /// Frames of input delay (manual mode), whole numbers.
+    InputDelay,
 }
 
 impl Slider {
@@ -227,6 +233,7 @@ impl Slider {
         match self {
             Slider::Sens(_) => (SENS_MIN, SENS_MAX),
             Slider::Volume => (0.0, 1.0),
+            Slider::InputDelay => (0.0, INPUT_DELAY_MAX as f32),
         }
     }
 
@@ -234,6 +241,7 @@ impl Slider {
         match self {
             Slider::Sens(axis) => s.sensitivity(axis),
             Slider::Volume => s.volume,
+            Slider::InputDelay => s.input_delay as f32,
         }
     }
 
@@ -241,6 +249,7 @@ impl Slider {
         match self {
             Slider::Sens(axis) => s.set_sensitivity(axis, v),
             Slider::Volume => s.set_volume(v),
+            Slider::InputDelay => s.set_input_delay(v),
         }
     }
 
@@ -255,6 +264,7 @@ impl Slider {
         match self {
             Slider::Sens(_) => format!("{:.2}", self.value(s)),
             Slider::Volume => format!("{:.0}%", self.value(s) * 100.0),
+            Slider::InputDelay => format!("{} ({} ms)", s.input_delay, frames_to_ms(s.input_delay)),
         }
     }
 
@@ -263,6 +273,7 @@ impl Slider {
         match self {
             Slider::Sens(_) => format!("{:.2}", self.value(s)),
             Slider::Volume => format!("{:.0}", self.value(s) * 100.0),
+            Slider::InputDelay => s.input_delay.to_string(),
         }
     }
 
@@ -275,8 +286,14 @@ impl Slider {
         Some(match self {
             Slider::Sens(_) => v,
             Slider::Volume => v / 100.0,
+            Slider::InputDelay => v,
         })
     }
+}
+
+/// Whole milliseconds a number of simulation ticks lasts.
+pub fn frames_to_ms(frames: u8) -> u32 {
+    (frames as f32 * 1000.0 / crate::net::ROLLBACK_FPS as f32).round() as u32
 }
 
 #[derive(Resource, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -293,6 +310,13 @@ pub struct Settings {
     /// Web only: take the page fullscreen on the click that starts play. Off by default; in
     /// Chromium it arms the keyboard lock, which lets Ctrl be bound without Ctrl+W closing the tab.
     pub fullscreen: bool,
+    /// Let the game pick the input delay from the connection (see `netstats::tune_input_delay`).
+    /// Off: `input_delay` is used as is.
+    pub adaptive_delay: bool,
+    /// Frames between pressing a key and the simulation acting on it, when not adaptive. More
+    /// delay hides latency and jitter from the opponent's view (fewer, shallower rollbacks on
+    /// their side) at the cost of one's own responsiveness.
+    pub input_delay: u8,
     pub bindings: Bindings,
 }
 
@@ -305,6 +329,8 @@ impl Default for Settings {
             invert_y: false,
             volume: 0.50,
             fullscreen: false,
+            adaptive_delay: true,
+            input_delay: INPUT_DELAY_DEFAULT,
             bindings: Bindings::default(),
         }
     }
@@ -346,6 +372,11 @@ impl Settings {
         self.volume = (value.clamp(0.0, 1.0) * 100.0).round() / 100.0;
     }
 
+    /// Sets the manual input delay, rounded to whole frames within `0..=INPUT_DELAY_MAX`.
+    pub fn set_input_delay(&mut self, value: f32) {
+        self.input_delay = value.round().clamp(0.0, INPUT_DELAY_MAX as f32) as u8;
+    }
+
     /// Unlocks or relocks the axes; relocking copies X into Y.
     pub fn set_separate_sensitivity(&mut self, separate: bool) {
         self.separate_sensitivity = separate;
@@ -377,7 +408,9 @@ impl Settings {
         ));
         out.push_str(&format!("invert_y = {}\n\n[audio]\n", self.invert_y));
         out.push_str(&format!("volume = {:.2}\n\n[video]\n", self.volume));
-        out.push_str(&format!("fullscreen = {}\n\n[keys]\n", self.fullscreen));
+        out.push_str(&format!("fullscreen = {}\n\n[network]\n", self.fullscreen));
+        out.push_str(&format!("adaptive_delay = {}\n", self.adaptive_delay));
+        out.push_str(&format!("input_delay = {}\n\n[keys]\n", self.input_delay));
         for a in Action::ALL {
             out.push_str(&format!(
                 "{} = {}\n",
@@ -421,6 +454,12 @@ impl Settings {
                 "separate_sensitivity" => separate = matches!(v, "true" | "1" | "yes"),
                 "invert_y" => s.invert_y = matches!(v, "true" | "1" | "yes"),
                 "fullscreen" => s.fullscreen = matches!(v, "true" | "1" | "yes"),
+                "adaptive_delay" => s.adaptive_delay = matches!(v, "true" | "1" | "yes"),
+                "input_delay" => {
+                    if let Ok(x) = v.parse::<f32>() {
+                        s.set_input_delay(x);
+                    }
+                }
                 "volume" => {
                     if let Ok(x) = v.parse() {
                         s.set_volume(x);

@@ -9,3 +9,7 @@ description = "Deterministic TF2-accurate simulation for endif (soldier 1v1 airs
 serde = { workspace = true }
 bytemuck = { workspace = true }
 libm = { workspace = true }
+
+[dev-dependencies]
+# `tests/netsweep.rs`: two GGRS peers over a simulated link.
+ggrs = "0.13"

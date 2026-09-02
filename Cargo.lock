@@ -3192,6 +3192,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "winit",
  "winresource",
 ]
@@ -3227,6 +3228,7 @@ name = "endif-sim"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "ggrs",
  "libm",
  "serde",
 ]

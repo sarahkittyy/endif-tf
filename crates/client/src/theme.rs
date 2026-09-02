@@ -75,8 +75,11 @@ impl Plugin for ThemePlugin {
     }
 }
 
+/// Alpha of the drop shadow under `heading` text; anything fading a heading out scales it too.
+pub const SHADOW_ALPHA: f32 = 0.6;
+
 fn shadow() -> TextShadow {
-    TextShadow { offset: Vec2::new(2.0, 3.0), color: Color::srgba(0.0, 0.0, 0.0, 0.6) }
+    TextShadow { offset: Vec2::new(2.0, 3.0), color: Color::srgba(0.0, 0.0, 0.0, SHADOW_ALPHA) }
 }
 
 impl Theme {
@@ -140,10 +143,14 @@ impl Theme {
     }
 }
 
+/// `panel`'s border width and corner radius, for things that line up with them.
+pub const PANEL_BORDER: f32 = 2.0;
+pub const PANEL_RADIUS: f32 = 8.0;
+
 /// A `TFFatLineBorder` panel: dark brown, rounded, thin tan border, soft shadow.
 pub fn panel(mut node: Node) -> impl Bundle {
-    node.border = UiRect::all(Val::Px(2.0));
-    node.border_radius = BorderRadius::all(Val::Px(8.0));
+    node.border = UiRect::all(Val::Px(PANEL_BORDER));
+    node.border_radius = BorderRadius::all(Val::Px(PANEL_RADIUS));
     (
         node,
         BackgroundColor(PANEL_BG),

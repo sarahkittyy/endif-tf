@@ -16,6 +16,9 @@ mod icon;
 mod loading;
 mod menu;
 mod net;
+#[cfg(feature = "netsim")]
+mod netsim;
+mod netstats;
 mod particles;
 mod player_model;
 mod render;
@@ -164,6 +167,7 @@ fn main() {
             audio::AudioFxPlugin,
             menu::MenuPlugin,
             net::NetPlugin,
+            netstats::NetStatsPlugin,
             game::GamePlugin,
             render::RenderPlugin,
             player_model::PlayerModelPlugin,

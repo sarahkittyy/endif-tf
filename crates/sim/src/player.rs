@@ -70,6 +70,13 @@ pub struct Player {
     pub pending_boosts: Vec<u32>,
     /// Number of confirmed airshot kills this round (stats).
     pub airshots: i32,
+    /// Whether the player has touched the ground since spawning. False while falling in from a
+    /// high respawn: a kill made before it becomes true extends the attacker's `chain`.
+    pub landed_since_spawn: bool,
+    /// Length of the current kill chain: 1 after an ordinary kill, one more for each kill on a
+    /// victim that had not landed since respawning, 0 after dying. The kill feed shows "x2",
+    /// "x3", ... for chains of two or more.
+    pub chain: u8,
 }
 
 impl Hash for Player {
@@ -108,6 +115,8 @@ impl Hash for Player {
         self.score.hash(state);
         self.pending_boosts.hash(state);
         self.airshots.hash(state);
+        self.landed_since_spawn.hash(state);
+        self.chain.hash(state);
     }
 }
 
@@ -148,6 +157,8 @@ impl Default for Player {
             score: 0,
             pending_boosts: Vec::new(),
             airshots: 0,
+            landed_since_spawn: false,
+            chain: 0,
         }
     }
 }

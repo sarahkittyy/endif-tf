@@ -31,6 +31,9 @@ pub struct Sfx {
     pub crit_received: Vec<Clip>,
     pub hitsound: Clip,
     pub killsound: Clip,
+    /// Chain sting (a kill on a victim who had not landed since respawning), played pitched up
+    /// by `CHAIN_SEMITONES` for the multiplier.
+    pub killstreak: Clip,
     pub freeze_cam: Clip,
     pub button_click: Clip,
     pub button_rollover: Clip,
@@ -65,6 +68,7 @@ impl Sfx {
             self.rocket_reload.clone(),
             self.hitsound.clone(),
             self.killsound.clone(),
+            self.killstreak.clone(),
             self.freeze_cam.clone(),
             self.button_click.clone(),
             self.button_rollover.clone(),
@@ -107,6 +111,7 @@ impl FromWorld for Sfx {
             crit_received: set(&["player/crit_received1", "player/crit_received2", "player/crit_received3"]),
             hitsound: load("ui/hitsound"),
             killsound: load("ui/killsound"),
+            killstreak: load("misc/killstreak"),
             freeze_cam: load("misc/freeze_cam"),
             button_click: load("ui/buttonclick"),
             button_rollover: load("ui/buttonrollover"),
@@ -138,6 +143,10 @@ impl FromWorld for Sfx {
         }
     }
 }
+
+/// Pitch of the chain sting for x2, x3, x4 and x5, in semitones above the file; longer chains
+/// (not reachable in a first-to-5) repeat the last one.
+const CHAIN_SEMITONES: [f32; 4] = [0.0, 4.0, 6.0, 9.0];
 
 /// Sounds scheduled for a later wall-clock time (announcer lines after a round, ...).
 #[derive(Resource, Default)]
@@ -199,6 +208,12 @@ fn pick(clips: &[Clip]) -> &Clip {
 
 fn play(commands: &mut Commands, clip: &Clip, volume: f32) {
     commands.spawn((AudioPlayer::new(clip.clone()), PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume))));
+}
+
+/// Like `play`, resampled `semitones` up (a pitch shift that also shortens the clip).
+fn play_pitched(commands: &mut Commands, clip: &Clip, volume: f32, semitones: f32) {
+    let speed = 2f32.powf(semitones / 12.0);
+    commands.spawn((AudioPlayer::new(clip.clone()), PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)).with_speed(speed)));
 }
 
 /// Simple distance falloff for sounds made by the opponent: full volume within 200 units, then
@@ -300,7 +315,13 @@ fn game_sounds(
             SimEvent::Explosion { origin, .. } => {
                 play(&mut commands, pick(&sfx.explode), attenuate(*origin, my_pos, 0.8));
             }
-            SimEvent::PlayerHit { victim, attacker, airshot_kill, .. } => {
+            SimEvent::PlayerHit { victim, attacker, airshot_kill, chain, .. } => {
+                // Chaining (a kill before the victim landed from their respawn): both players
+                // hear the sting, a step higher with every link, x2, x3, ...
+                if *chain >= 2 && attacker != victim {
+                    let tier = (*chain as usize - 2).min(CHAIN_SEMITONES.len() - 1);
+                    play_pitched(&mut commands, &sfx.killstreak, 0.6, CHAIN_SEMITONES[tier]);
+                }
                 if *attacker == me && *victim != me {
                     if *airshot_kill {
                         play(&mut commands, pick(&sfx.crit_hit), 0.9);

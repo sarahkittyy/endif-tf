@@ -232,6 +232,15 @@ fn setup_scene(
     viewmodel::spawn(&mut commands, camera, &assets, local.0 == 1);
 }
 
+/// Ticks past the newest simulated state the view keeps moving at the last velocity when no new
+/// state arrives (the peer's inputs are late and GGRS is waiting). Short stalls then read as
+/// motion instead of a freeze, like `cl_extrapolate` in Source; after that the view holds, since
+/// guessing further only makes the correction bigger when the frames do come.
+const EXTRAPOLATE_TICKS: f64 = 2.0;
+const TICK_SECS: f32 = 1.0 / crate::net::ROLLBACK_FPS as f32;
+
+/// Position and view offset of player `i` at `alpha` ticks after the previous state: between the
+/// two states up to 1, extrapolated from the current one beyond that.
 fn lerp_state(prev: &SimState, cur: &SimState, alpha: f32, i: usize) -> (SVec3, SVec3) {
     let a = &prev.players[i];
     let b = &cur.players[i];
@@ -239,14 +248,19 @@ fn lerp_state(prev: &SimState, cur: &SimState, alpha: f32, i: usize) -> (SVec3, 
     if a.spawn_tick != b.spawn_tick || !a.alive || !b.alive {
         return (b.origin, b.view_offset);
     }
+    if alpha > 1.0 {
+        return (b.origin + b.velocity * ((alpha - 1.0) * TICK_SECS), b.view_offset);
+    }
     let origin = a.origin + (b.origin - a.origin) * alpha;
     let view = a.view_offset + (b.view_offset - a.view_offset) * alpha;
     (origin, view)
 }
 
+/// Ticks since the previous state: 0..1 while a new state arrives every tick, up to
+/// `1 + EXTRAPOLATE_TICKS` while waiting for one.
 fn interp_alpha(states: &RenderStates, now: f64) -> f32 {
     let dt = 1.0 / crate::net::ROLLBACK_FPS as f64;
-    ((now - states.last_advance) / dt).clamp(0.0, 1.0) as f32
+    ((now - states.last_advance) / dt).clamp(0.0, 1.0 + EXTRAPOLATE_TICKS) as f32
 }
 
 pub fn sync_players(
@@ -285,7 +299,7 @@ pub fn sync_rockets(
             Some(r) => {
                 seen.push(r.id);
                 let prev = states.prev.rockets.iter().find(|p| p.id == r.id).map(|p| p.origin).unwrap_or(r.origin);
-                let origin = prev + (r.origin - prev) * alpha;
+                let origin = if alpha > 1.0 { r.origin + r.velocity * ((alpha - 1.0) * TICK_SECS) } else { prev + (r.origin - prev) * alpha };
                 let dir = to_bevy_dir(r.velocity).normalize_or_zero();
                 let from = tf.translation;
                 tf.translation = to_bevy(origin);

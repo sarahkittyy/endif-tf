@@ -32,6 +32,9 @@ struct ClipText;
 struct ReserveText;
 #[derive(Component)]
 struct StatusText;
+/// One of the four signal bars next to the status text, lit from the first up to the level.
+#[derive(Component)]
+struct SignalBar(u8);
 #[derive(Component)]
 struct HeightText;
 #[derive(Component)]
@@ -48,6 +51,8 @@ struct KillFeed;
 #[derive(Component)]
 struct KillFeedEntry {
     born: f64,
+    /// Seconds the line stays fully visible before fading (`KILL_HOLD_SECS`, doubled for chains).
+    hold: f64,
 }
 /// Base alpha of a kill feed element; the fade-out scales it toward zero.
 #[derive(Component)]
@@ -57,6 +62,10 @@ struct Fades(f32);
 const KILL_HOLD_SECS: f64 = 2.0;
 const KILL_FADE_SECS: f64 = 0.5;
 const KILL_MAX_LINES: usize = 5;
+/// Every size in a line (row height, fonts, icon, gaps) is this many times the TF2 original.
+const KILL_SCALE: f32 = 2.0;
+/// Chained kills hold this many times longer than a plain kill.
+const CHAIN_HOLD: f64 = 2.0;
 
 pub struct HudPlugin;
 
@@ -64,7 +73,7 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NetStatus>()
             .add_systems(OnEnter(AppState::InGame), setup_hud)
-            .add_systems(Update, (update_hud, kill_flashes, kill_feed).run_if(in_state(AppState::InGame)));
+            .add_systems(Update, (update_hud, update_signal, kill_flashes, kill_feed).run_if(in_state(AppState::InGame)));
     }
 }
 
@@ -105,7 +114,7 @@ fn score_box(theme: &Theme, color: Color, marker: impl Component, handle: usize)
     )
 }
 
-fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>) {
+fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>, kind: Option<Res<MatchKind>>) {
     let (me, them) = (local.0, 1 - local.0);
     // Crosshair: a small cross with a dark outline.
     for (w, h) in [(16.0, 2.0), (2.0, 16.0)] {
@@ -223,7 +232,8 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>)
             p.spawn((SpeedText, theme.label("", 13.0, theme::OFF_WHITE)));
         });
 
-    // Top left: focus hint + connection warnings.
+    // Top left: signal bars (online matches) + focus hint + connection warnings.
+    let online = !matches!(kind.as_deref(), None | Some(MatchKind::Practice));
     commands
         .spawn((
             GameEntity,
@@ -231,11 +241,26 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>)
                 position_type: PositionType::Absolute,
                 top: Val::Px(12.0),
                 left: Val::Px(12.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
                 ..default()
             }),
         ))
         .with_children(|p| {
+            if online {
+                p.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::FlexEnd, column_gap: Val::Px(2.0), ..default() })
+                    .with_children(|bars| {
+                        for level in 1..=4u8 {
+                            bars.spawn((
+                                SignalBar(level),
+                                Node { width: Val::Px(4.0), height: Val::Px(4.0 + 3.0 * level as f32), ..default() },
+                                BackgroundColor(SIGNAL_OFF),
+                            ));
+                        }
+                    });
+            }
             p.spawn((StatusText, theme.label("click to focus - Esc for menu", 13.0, theme::OFF_WHITE)));
         });
 
@@ -262,6 +287,27 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>)
             TextLayout { justify: Justify::Center, ..default() },
         ));
     });
+}
+
+const SIGNAL_OFF: Color = Color::srgba(1.0, 1.0, 1.0, 0.18);
+const SIGNAL_GOOD: Color = Color::srgb(0.45, 0.85, 0.4);
+
+/// Lights the signal bars up to the connection's level: green for 3 and 4, yellow for 2, red for
+/// 1 and none at all while the peer is unreachable.
+fn update_signal(stats: Res<crate::netstats::NetStats>, status: Res<NetStatus>, time: Res<Time<Real>>, mut bars: Query<(&SignalBar, &mut BackgroundColor)>) {
+    let level = crate::netstats::signal_level(&stats, &status, time.elapsed_secs_f64());
+    let lit = match level {
+        0 => SIGNAL_OFF,
+        1 => theme::DEATH_RED,
+        2 => theme::YELLOW,
+        _ => SIGNAL_GOOD,
+    };
+    for (bar, mut color) in &mut bars {
+        let want = if bar.0 <= level { lit } else { SIGNAL_OFF };
+        if color.0 != want {
+            color.0 = want;
+        }
+    }
 }
 
 /// A HUD label marked `T`. `Without<NameOf>` keeps these queries disjoint from the name tags
@@ -387,7 +433,9 @@ fn kill_flashes(
 }
 
 /// TF2-style death notices: `killer [soldier] victim  N U`, names in team colours (RED is the
-/// local player, BLU the opponent). Each line holds for two seconds, fades, then is removed.
+/// local player, BLU the opponent). A chain (the victim was killed again before landing from
+/// their respawn) puts a big yellow `x2`, `x3`, ... in front of the killer. Each line holds for
+/// two seconds, fades, then is removed.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn kill_feed(
     mut commands: Commands,
@@ -398,7 +446,7 @@ fn kill_feed(
     time: Res<Time<Real>>,
     feed: Query<(Entity, Option<&Children>), With<KillFeed>>,
     mut entries: Query<(Entity, &KillFeedEntry, &Fades, &Children, &mut BackgroundColor, &mut BorderColor)>,
-    mut parts: Query<(&Fades, Option<&mut TextColor>, Option<&mut ImageNode>), Without<KillFeedEntry>>,
+    mut parts: Query<(&Fades, Option<&mut TextColor>, Option<&mut TextShadow>, Option<&mut ImageNode>), Without<KillFeedEntry>>,
 ) {
     let Ok((feed, lines)) = feed.single() else { return };
     let now = time.elapsed_secs_f64();
@@ -406,7 +454,7 @@ fn kill_feed(
     // Drop lines that have finished fading, and the oldest ones if the feed is getting long.
     let mut live: Vec<Entity> = lines.map(|c| c.iter().collect()).unwrap_or_default();
     live.retain(|&e| match entries.get(e) {
-        Ok((_, entry, ..)) if now - entry.born > KILL_HOLD_SECS + KILL_FADE_SECS => {
+        Ok((_, entry, ..)) if now - entry.born > entry.hold + KILL_FADE_SECS => {
             commands.entity(e).despawn();
             false
         }
@@ -414,11 +462,13 @@ fn kill_feed(
         Err(_) => false,
     });
 
-    let fresh: Vec<(u8, u8, f32)> = fx
+    let fresh: Vec<(u8, u8, f32, u8)> = fx
         .events
         .iter()
         .filter_map(|ev| match ev {
-            SimEvent::PlayerHit { attacker, victim, airshot_kill: true, distance, .. } if attacker != victim => Some((*attacker, *victim, *distance)),
+            SimEvent::PlayerHit { attacker, victim, airshot_kill: true, distance, chain, .. } if attacker != victim => {
+                Some((*attacker, *victim, *distance, *chain))
+            }
             _ => None,
         })
         .collect();
@@ -427,21 +477,24 @@ fn kill_feed(
         commands.entity(e).despawn();
     }
 
-    for (attacker, victim, distance) in fresh {
-        let entry = spawn_kill_line(&mut commands, &theme, &names, local.0, attacker as usize, victim as usize, distance, now);
+    for (attacker, victim, distance, chain) in fresh {
+        let entry = spawn_kill_line(&mut commands, &theme, &names, local.0, attacker as usize, victim as usize, distance, chain, now);
         commands.entity(feed).add_child(entry);
     }
 
     // Fade: scale every element's base alpha once the hold time is up.
     for (_, entry, base, children, mut bg, mut border) in &mut entries {
         let age = now - entry.born;
-        let a = if age <= KILL_HOLD_SECS { 1.0 } else { (1.0 - (age - KILL_HOLD_SECS) / KILL_FADE_SECS).clamp(0.0, 1.0) } as f32;
+        let a = if age <= entry.hold { 1.0 } else { (1.0 - (age - entry.hold) / KILL_FADE_SECS).clamp(0.0, 1.0) } as f32;
         bg.0 = bg.0.with_alpha(base.0 * a);
         *border = BorderColor::all(border.top.with_alpha(a));
         for child in children.iter() {
-            if let Ok((base, text, image)) = parts.get_mut(child) {
+            if let Ok((base, text, shadow, image)) = parts.get_mut(child) {
                 if let Some(mut t) = text {
                     t.0 = t.0.with_alpha(base.0 * a);
+                }
+                if let Some(mut s) = shadow {
+                    s.color = s.color.with_alpha(theme::SHADOW_ALPHA * base.0 * a);
                 }
                 if let Some(mut i) = image {
                     i.color = i.color.with_alpha(base.0 * a);
@@ -451,8 +504,13 @@ fn kill_feed(
     }
 }
 
+/// Chain badge size, in the TF2 Build font: it fills the 30 px line while the names stay 14 px.
+const CHAIN_FONT_PX: f32 = 22.0;
+
 #[allow(clippy::too_many_arguments)]
-fn spawn_kill_line(commands: &mut Commands, theme: &Theme, names: &PlayerNames, local: usize, attacker: usize, victim: usize, distance: f32, now: f64) -> Entity {
+fn spawn_kill_line(commands: &mut Commands, theme: &Theme, names: &PlayerNames, local: usize, attacker: usize, victim: usize, distance: f32, chain: u8, now: f64) -> Entity {
+    let k = KILL_SCALE;
+    let hold = if chain >= 2 { KILL_HOLD_SECS * CHAIN_HOLD } else { KILL_HOLD_SECS };
     let team = |h: usize| if h == local { theme::RED_TEAM } else { theme::BLU_TEAM };
     let name = |h: usize| -> String {
         let n = names.0.get(h).map(String::as_str).unwrap_or_default();
@@ -463,33 +521,40 @@ fn spawn_kill_line(commands: &mut Commands, theme: &Theme, names: &PlayerNames, 
     let text = |s: String, color: Color| {
         (
             Fades(1.0),
-            theme.label(s, 14.0, color),
+            theme.label(s, 14.0 * k, color),
             bevy::text::LineHeight::RelativeToFont(1.0),
             TextLayout { linebreak: bevy::text::LineBreak::NoWrap, ..default() },
         )
     };
-    commands
-        .spawn((
-            KillFeedEntry { born: now },
-            Fades(theme::PANEL_BG.alpha()),
-            Node {
-                height: Val::Px(30.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(8.0),
-                padding: UiRect::horizontal(Val::Px(10.0)),
-                border: UiRect::all(Val::Px(2.0)),
-                border_radius: BorderRadius::all(Val::Px(6.0)),
-                ..default()
-            },
-            BackgroundColor(theme::PANEL_BG),
-            BorderColor::all(theme::TAN_DARK),
-            children![
-                text(name(attacker), team(attacker)),
-                (Fades(1.0), theme.soldier_icon(20.0)),
-                text(name(victim), team(victim)),
-                text(format!("{distance:.0} U"), theme::OFF_WHITE),
-            ],
-        ))
-        .id()
+    let mut entry = commands.spawn((
+        KillFeedEntry { born: now, hold },
+        Fades(theme::PANEL_BG.alpha()),
+        Node {
+            height: Val::Px(30.0 * k),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0 * k),
+            padding: UiRect::horizontal(Val::Px(10.0 * k)),
+            border: UiRect::all(Val::Px(2.0 * k)),
+            border_radius: BorderRadius::all(Val::Px(6.0 * k)),
+            ..default()
+        },
+        BackgroundColor(theme::PANEL_BG),
+        BorderColor::all(theme::TAN_DARK),
+    ));
+    entry.with_children(|p| {
+        if chain >= 2 {
+            p.spawn((
+                Fades(1.0),
+                theme.heading(format!("x{chain}"), CHAIN_FONT_PX * k, theme::YELLOW),
+                bevy::text::LineHeight::RelativeToFont(1.0),
+                TextLayout { linebreak: bevy::text::LineBreak::NoWrap, ..default() },
+            ));
+        }
+        p.spawn(text(name(attacker), team(attacker)));
+        p.spawn((Fades(1.0), theme.soldier_icon(20.0 * k)));
+        p.spawn(text(name(victim), team(victim)));
+        p.spawn(text(format!("{distance:.0} U"), theme::OFF_WHITE));
+    });
+    entry.id()
 }

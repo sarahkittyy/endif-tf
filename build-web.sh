@@ -73,7 +73,8 @@ compress() {
 build() {
   local backend="$1"
   echo "== building endif-$backend ($PROFILE, $ENDIF_ASSET_DIR)"
-  cargo build -p endif-client --target wasm32-unknown-unknown --profile "$PROFILE" --no-default-features --features "$backend"
+  # ENDIF_FEATURES adds cargo features for a dev build (e.g. ENDIF_FEATURES=netsim); never set it for a deploy.
+  cargo build -p endif-client --target wasm32-unknown-unknown --profile "$PROFILE" --no-default-features --features "$backend${ENDIF_FEATURES:+ $ENDIF_FEATURES}"
   wasm-bindgen --target web --out-dir "$STAGE" --out-name "endif-$backend" --no-typescript \
     "target/wasm32-unknown-unknown/$PROFILE/endif-client.wasm"
   "$PY" tools/strip_comments.py "$STAGE/endif-$backend.js"

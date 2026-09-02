@@ -357,3 +357,96 @@ fn simulation_is_deterministic_and_rollback_safe() {
     assert_eq!(a.checksum(), c.checksum(), "resimulation from a snapshot must match");
     assert!(a.players.iter().all(|p| p.origin.is_finite() && p.velocity.is_finite()));
 }
+
+/// Aims player 1 at player 0 with lead for the victim's current velocity (and gravity), fires,
+/// and returns the `chain` of the resulting airshot kill, or `None` if the rocket missed.
+fn fire_at_victim(sim: &mut SimState, arena: &Arena) -> Option<u8> {
+    while sim.curtime() < sim.players[1].next_primary_attack {
+        sim.step(arena, [idle(180.0), idle(180.0)]);
+    }
+    let eye = sim.players[1].eye_position();
+    let center = sim.players[0].world_space_center();
+    let vel = sim.players[0].velocity;
+    // Iterate the intercept: where the victim will be by the time the rocket gets there.
+    let mut t = (center - eye).length() / ROCKET_SPEED;
+    let mut aim = center;
+    for _ in 0..4 {
+        aim = center + vel * t + Vec3::new(0.0, 0.0, -0.5 * SV_GRAVITY * t * t);
+        t = (aim - eye).length() / ROCKET_SPEED;
+    }
+    let a = endif_sim::math::vector_angles(aim - eye);
+    let pitch = if a.pitch > 180.0 { a.pitch - 360.0 } else { a.pitch };
+    sim.step(arena, [idle(180.0), with(IN_ATTACK, pitch, a.yaw)]);
+    assert!(sim.events.iter().any(|e| matches!(e, SimEvent::RocketFired { shooter: 1, .. })), "rocket should fire");
+    for _ in 0..120 {
+        sim.step(arena, [idle(180.0), idle(180.0)]);
+        let kill = sim.events.iter().find_map(|e| match e {
+            SimEvent::PlayerHit { victim: 0, attacker: 1, airshot_kill: true, chain, .. } => Some(*chain),
+            _ => None,
+        });
+        if kill.is_some() {
+            return kill;
+        }
+        if sim.events.iter().any(|e| matches!(e, SimEvent::Explosion { .. })) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Runs the sim until the dead victim is back, then stands the shooter at the arena centre (300
+/// units from every spawn, muzzle clear of the walls) with the launcher ready, so the next rocket
+/// arrives long before the victim falls below the airshot line.
+fn respawn_victim(sim: &mut SimState, arena: &Arena) {
+    for _ in 0..(sim.rules.respawn_delay_ticks + 2) {
+        if sim.players[0].alive {
+            break;
+        }
+        sim.step(arena, [idle(180.0), idle(180.0)]);
+    }
+    assert!(sim.players[0].alive, "victim should respawn");
+    place(sim, 1, Vec3::ZERO, 180.0);
+    sim.players[1].next_primary_attack = sim.curtime();
+}
+
+#[test]
+fn kills_before_the_victim_lands_from_respawn_chain() {
+    let (arena, mut sim) = fresh();
+    place(&mut sim, 0, Vec3::new(0.0, 0.0, 0.0), 180.0);
+    place(&mut sim, 1, Vec3::new(400.0, 0.0, 0.0), 180.0);
+    settle(&mut sim, &arena, 3);
+    assert!(sim.players[0].landed_since_spawn, "a floor spawn counts as landed");
+
+    // First kill: the victim is thrown up and shot. An ordinary kill, chain 1.
+    sim.players[0].velocity = Vec3::new(0.0, 0.0, 900.0);
+    for _ in 0..30 {
+        sim.step(&arena, [idle(180.0), idle(180.0)]);
+    }
+    assert_eq!(fire_at_victim(&mut sim, &arena), Some(1), "first kill");
+    assert_eq!(sim.players[1].chain, 1);
+    assert_eq!(sim.players[0].chain, 0);
+
+    // The victim comes back high up; killing them before they land chains: x2, then x3.
+    for expected in [2u8, 3] {
+        respawn_victim(&mut sim, &arena);
+        assert!(!sim.players[0].landed_since_spawn, "respawned high, not landed yet");
+        assert_eq!(fire_at_victim(&mut sim, &arena), Some(expected), "chain x{expected}");
+        assert_eq!(sim.players[1].chain, expected);
+    }
+
+    // Letting the victim land breaks the chain: the next kill is an ordinary one again.
+    respawn_victim(&mut sim, &arena);
+    for _ in 0..300 {
+        if sim.players[0].on_ground() {
+            break;
+        }
+        sim.step(&arena, [idle(180.0), idle(180.0)]);
+    }
+    assert!(sim.players[0].on_ground() && sim.players[0].landed_since_spawn, "victim should have landed");
+    sim.players[0].velocity = Vec3::new(0.0, 0.0, 900.0);
+    for _ in 0..30 {
+        sim.step(&arena, [idle(180.0), idle(180.0)]);
+    }
+    assert_eq!(fire_at_victim(&mut sim, &arena), Some(1), "kill after landing");
+    assert_eq!(sim.players[1].chain, 1);
+}

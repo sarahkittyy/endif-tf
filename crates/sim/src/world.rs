@@ -21,8 +21,10 @@ pub enum SimEvent {
     RocketFired { shooter: u8, rocket_id: u32, origin: Vec3, velocity: Vec3 },
     Explosion { rocket_id: u32, origin: Vec3, normal: Vec3, hit_player: Option<u8> },
     /// `height` is the victim's height above the ground below; `distance` is how far the rocket
-    /// flew from the muzzle to the explosion.
-    PlayerHit { victim: u8, attacker: u8, damage: f32, direct: bool, airshot_kill: bool, height: f32, distance: f32 },
+    /// flew from the muzzle to the explosion. `chain` is the attacker's kill chain after the hit:
+    /// 0 when it did not kill, 1 for a plain kill, 2 or more when the victim was killed before
+    /// landing from their respawn (see `Player::chain`).
+    PlayerHit { victim: u8, attacker: u8, damage: f32, direct: bool, airshot_kill: bool, height: f32, distance: f32, chain: u8 },
     Killed { victim: u8, attacker: u8 },
     Respawn { player: u8, origin: Vec3 },
     RoundWon { winner: u8, score: [i32; 2] },
@@ -160,6 +162,7 @@ impl SimState {
             self.players[idx].velocity = Vec3::new(cosf(yaw) * speed, sinf(yaw) * speed, 0.0);
         }
         self.players[idx].origin = origin;
+        self.players[idx].landed_since_spawn = !high;
         self.events.push(SimEvent::Respawn { player: idx as u8, origin });
     }
 
@@ -171,10 +174,14 @@ impl SimState {
         self.players[victim].respawn_tick = self.tick + self.rules.respawn_delay_ticks;
         self.players[victim].respawn_high = true;
         self.players[victim].pending_boosts.clear();
+        self.players[victim].chain = 0;
         self.events.push(SimEvent::Killed { victim: victim as u8, attacker: attacker as u8 });
 
         if attacker != victim {
             self.players[attacker].score += 1;
+            // Chaining: killing a victim who has not landed since respawning extends the chain.
+            let chain = self.players[attacker].chain;
+            self.players[attacker].chain = if self.players[victim].landed_since_spawn { 1 } else { chain.max(1).saturating_add(1) };
             // RegenKiller: the killer is regenerated after each kill.
             self.players[attacker].health = self.players[attacker].max_health;
             self.players[attacker].clip = ROCKET_CLIP_SIZE;
@@ -247,10 +254,13 @@ impl SimState {
             let fall_velocity = self.players[i].fall_velocity;
             run_player_move(&mut self.players[i], &input, env, curtime);
             let p = &self.players[i];
-            if !was_on_ground && p.ground.is_some() {
+            let landed = !was_on_ground && p.ground.is_some();
+            let jumped = !was_jumping && p.jumping;
+            if landed {
+                self.players[i].landed_since_spawn = true;
                 self.events.push(SimEvent::Landed { player: i as u8, fall_velocity });
             }
-            if !was_jumping && p.jumping {
+            if jumped {
                 self.events.push(SimEvent::Jumped { player: i as u8 });
             }
 
@@ -410,32 +420,44 @@ impl SimState {
         let tick = self.tick;
         for h in hits {
             let v = h.victim as usize;
-            self.events.push(SimEvent::PlayerHit {
-                victim: h.victim,
-                attacker: h.attacker,
-                damage: h.damage,
-                direct: h.direct,
-                airshot_kill: h.airshot_kill,
-                height: h.height_above_ground,
-                distance,
-            });
+            let attacker = h.attacker as usize;
+            // The hit event goes before the kill it causes, but its chain count is only known
+            // after the kill has been applied, so the slot is reserved here and filled below.
+            let hit_at = self.events.len();
 
             if h.victim != h.attacker {
                 // Attacker is holding a rocket launcher → BoostVectors timer.
                 self.players[v].pending_boosts.push(tick + MGE_ENDIF_BOOST_DELAY_TICKS);
             }
 
+            let mut killed = false;
             if h.airshot_kill {
                 self.players[v].airshots += 0; // victim stat unchanged
-                self.players[h.attacker as usize].airshots += 1;
-                self.kill(v, h.attacker as usize, arena);
+                self.players[attacker].airshots += 1;
+                self.kill(v, attacker, arena);
+                killed = true;
             } else if self.players[v].health <= 0 {
                 // Lethal raw damage (cannot happen without crits, kept for completeness).
-                self.kill(v, h.attacker as usize, arena);
+                self.kill(v, attacker, arena);
+                killed = true;
             } else {
                 // Every non-lethal hit heals to full in endif.
                 self.players[v].health = self.players[v].max_health;
             }
+            let chain = if killed && v != attacker { self.players[attacker].chain } else { 0 };
+            self.events.insert(
+                hit_at,
+                SimEvent::PlayerHit {
+                    victim: h.victim,
+                    attacker: h.attacker,
+                    damage: h.damage,
+                    direct: h.direct,
+                    airshot_kill: h.airshot_kill,
+                    height: h.height_above_ground,
+                    distance,
+                    chain,
+                },
+            );
         }
     }
 }
