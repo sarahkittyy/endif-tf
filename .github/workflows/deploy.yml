@@ -1,21 +1,3 @@
-# Production deploy of endif.tf.
-#
-#   server     on the self-hosted runner on sarahvps2: checkout in place, run the migrations,
-#              build endif-server and the web client, publish dist/, restart the server.
-#   desktop    on GitHub's hosted runners: release builds for Windows and Linux, packaged by
-#              deploy/package-desktop.sh and uploaded as artifacts.
-#   downloads  back on sarahvps2: copies those packages (and the .version file naming the build
-#              each one is) to /srv/endif/download, which nginx serves as
-#              https://endif.tf/download/{windows,linux}[.version].
-#
-# The server goes live as soon as its own job is done; the desktop packages follow when the slower
-# hosted builds finish. Web clients reload for the new build at once; desktop clients see the update
-# but wait for their package's .version to match the server before downloading it.
-#
-# The nginx site and the supervisord program are installed once by hand and the workflow never
-# touches them (deploy/nginx and deploy/supervisor are gitignored local copies of what is on the
-# box, with the install commands in their comments). The production .env lives at
-# /srv/endif/.env and is symlinked into the checkout; nothing secret is stored on GitHub.
 name: Deploy
 
 on:
@@ -28,13 +10,11 @@ on:
       - ".claude/**"
   workflow_dispatch:
 
-# One deploy at a time; a second push waits instead of racing the first.
 concurrency:
   group: deploy
   cancel-in-progress: false
 
 env:
-  # Compiled into the desktop clients (option_env!); the web build takes it from /srv/endif/.env.
   ENDIF_SIGNALING: wss://endif.tf
 
 jobs:
@@ -44,7 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The checkout persists between runs; keep target/ (incremental builds) and dist/.
           clean: false
 
       - name: Link the production .env
@@ -96,7 +75,6 @@ jobs:
           - name: windows
             os: windows-latest
           - name: linux
-            # 22.04 rather than latest: the binary needs the glibc it was built against or newer.
             os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
     steps:
@@ -104,13 +82,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Caches ~/.cargo (registry, git checkouts) and the dependency artifacts under target/, keyed
-      # on Cargo.lock and the toolchain. Only the workspace crates (sim, client) are compiled again on
-      # a hit. Saved even when the build fails, so one broken push does not cost the next a cold
-      # build of Bevy.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-${{ matrix.name }}
+          key: desktop-${{ matrix.name }}-v2
           cache-on-failure: true
 
       - name: Linux build dependencies
@@ -121,10 +95,6 @@ jobs:
 
       - name: Build and package
         shell: bash
-        # CARGO_LOG: the restored cache has been ignored (a full rebuild of Bevy after a cache
-        # hit); cargo says per crate why it considers it dirty. Remove once the cause is found.
-        env:
-          CARGO_LOG: cargo::core::compiler::fingerprint=info
         run: bash deploy/package-desktop.sh ${{ matrix.name }}
 
       - uses: actions/upload-artifact@v4

@@ -1,5 +1,9 @@
 //! endif client: desktop + web build of the TF2 soldier airshot 1v1.
 
+// Release builds on Windows are a plain window with no console behind it. Logs still reach a
+// terminal the game was started from: see `attach_parent_console`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod account;
 mod assets;
 mod audio;
@@ -51,7 +55,33 @@ const ASSET_DIR: &str = match option_env!("ENDIF_ASSET_DIR") {
     None => "assets",
 };
 
+/// A `windows_subsystem = "windows"` binary starts without a console, so nothing it prints goes
+/// anywhere. When it was started from a terminal, attach to that terminal so the logs (and the
+/// `--build-id` answer) land there. Standard handles that are already set are left alone: the
+/// updater pipes `--build-id`, and a debug build has its own console. Started from Explorer there
+/// is no parent console, the call fails and the game runs silently, which is the point.
+#[cfg(windows)]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(std_handle: u32) -> isize;
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const INVALID_HANDLE_VALUE: isize = -1;
+    // SAFETY: plain Win32 calls that take and return integers only.
+    unsafe {
+        let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        if stdout == 0 || stdout == INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    attach_parent_console();
     // `endif --build-id` prints the build identity (the commit) and exits: the updater asks a
     // freshly downloaded build this before installing it, and `deploy/package-desktop.sh` writes
     // it next to the package. `--protocol` (the simulation identity) is what updaters shipped
