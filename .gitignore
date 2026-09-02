@@ -9,4 +9,5 @@
 /crates/tf_weaponbase_rocket.cpp
 /tools/tf2
 /web/nginx
-/deploy
+/deploy/nginx
+/deploy/supervisor
