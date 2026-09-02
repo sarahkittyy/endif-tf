@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <script>window.ENDIF_SIGNALING = "__SIGNALING__";</script>
+  <script>
+    // Clipboard helpers for the game (crates/client/src/webclip.rs). Browsers only allow clipboard
+    // access from a user gesture, and the game loop runs from requestAnimationFrame, so copying is
+    // done here (with the old execCommand path as a fallback) and pasting is captured from the
+    // page's own paste event into a buffer the game polls.
+    (() => {
+      let pasted = "";
+      const fallbackCopy = (text) => {
+        const focused = document.activeElement;
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        ta.remove();
+        // Selecting the textarea took keyboard focus off the game's canvas; give it back.
+        if (focused && focused.focus) focused.focus();
+        return ok;
+      };
+      window.endifCopy = (text) => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+        } else {
+          fallbackCopy(text);
+        }
+      };
+      // The on-screen "paste" button: a click gives no paste event, so this is the one place the
+      // permission-gated readText is used. Chrome asks once for clipboard access; Firefox 125+ shows
+      // a small "Paste" button next to the pointer that has to be clicked; older Firefox has no
+      // readText for web pages at all, and there Ctrl+V is the only way.
+      window.endifRequestPaste = () => {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          navigator.clipboard.readText().then((t) => { pasted = t || ""; }).catch(() => {});
+        }
+      };
+      // Download screen: a new tab for /download/<platform>. The game's click arrives from
+      // requestAnimationFrame, but browsers still count it as recent user activation; should the
+      // popup be blocked, navigating to an attachment URL downloads it without leaving the page.
+      window.endifOpen = (url) => {
+        const w = window.open(url, "_blank", "noopener");
+        if (!w) window.location.assign(url);
+      };
+      window.endifTakePasted = () => {
+        const t = pasted;
+        pasted = "";
+        return t ? t : null;
+      };
+      document.addEventListener("paste", (e) => {
+        const t = e.clipboardData && e.clipboardData.getData("text");
+        if (t) pasted = t;
+      }, { capture: true });
+      // Ctrl/Cmd+V while the canvas has focus. winit listens on the canvas and calls
+      // preventDefault() on every keydown, and cancelling the Ctrl+V keydown cancels the browser's
+      // paste action, so the paste event above would never fire. Stop the key here, in the capture
+      // phase on the window, before it reaches the canvas: the browser then carries out its normal
+      // paste and hands the text to the listener above. That needs no permission in any browser,
+      // unlike readText. The game never sees the V keydown, which is fine: it only used it to ask
+      // for exactly this.
+      window.addEventListener("keydown", (e) => {
+        const v = e.code === "KeyV" || e.key === "v" || e.key === "V";
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && v) e.stopImmediatePropagation();
+      }, { capture: true });
+    })();
+
+    // Keeping the tab alive under game input. Ctrl+W (crouch while running forward, for anyone who
+    // binds crouch to Ctrl as in TF2; the web build defaults to Shift for this reason) closes the
+    // tab in every browser and a page cannot cancel that key. Two layers:
+    //
+    // 1. Keyboard Lock (Chromium only). Once the page is fullscreen the listed keys go to the page
+    //    even with Ctrl held, so Ctrl+W/T/N/S/D become plain key events, and Esc is delivered as
+    //    a key (hold it for two seconds to leave fullscreen) instead of dropping the pointer lock.
+    //    The lock is asked for once here; it lies dormant until the page is fullscreen, which the
+    //    pointer-lock patch below enters on the click that starts play. Tab, the Meta keys and the
+    //    F-keys are left out on purpose so Alt+Tab, Ctrl+Tab, the Windows key and F5/F11/F12 keep
+    //    working; nothing in the game binds them.
+    // 2. A beforeunload prompt while a match is running (every browser, and Chromium outside
+    //    fullscreen): Ctrl+W then asks "leave site?" instead of killing the match on the spot. The
+    //    game toggles it through endifSetInMatch so the menus never nag.
+    (() => {
+      let inMatch = false;
+      window.endifSetInMatch = (on) => { inMatch = !!on; };
+      window.addEventListener("beforeunload", (e) => {
+        if (!inMatch) return;
+        e.preventDefault();
+        e.returnValue = "";
+      });
+      const kb = navigator.keyboard;
+      window.endifCanLockKeyboard = () => !!(kb && typeof kb.lock === "function");
+      if (!window.endifCanLockKeyboard()) return;
+      const keys = ["Escape", "Space", "Enter", "Backspace", "CapsLock",
+        "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight",
+        "Backquote", "Minus", "Equal", "BracketLeft", "BracketRight", "Backslash", "Semicolon",
+        "Quote", "Comma", "Period", "Slash", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+        "Insert", "Delete", "Home", "End", "PageUp", "PageDown"];
+      for (let c = 65; c <= 90; c++) keys.push("Key" + String.fromCharCode(c));
+      for (let d = 0; d <= 9; d++) keys.push("Digit" + d, "Numpad" + d);
+      const r = kb.lock(keys);
+      if (r && typeof r.catch === "function") r.catch(() => {});
+    })();
+  </script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>endif.tf</title>
+  <link rel="icon" type="image/png" href="__ASSET_DIR__/ui/rocket_launcher.png" />
+  <link rel="preload" as="font" type="font/ttf" href="__ASSET_DIR__/fonts/TF2Build.ttf" crossorigin />
+  <link rel="preload" as="font" type="font/ttf" href="__ASSET_DIR__/fonts/TF2Secondary.ttf" crossorigin />
+  <style>
+    @font-face { font-family: "TF2 Build"; src: url("__ASSET_DIR__/fonts/TF2Build.ttf") format("truetype"); font-display: swap; }
+    @font-face { font-family: "TF2 Secondary"; src: url("__ASSET_DIR__/fonts/TF2Secondary.ttf") format("truetype"); font-display: swap; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #292526; }
+    #endif-canvas { width: 100vw; height: 100vh; display: block; outline: none; }
+
+    
+    #loading { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; gap: 26px;
+               align-items: center; justify-content: center; text-align: center; user-select: none;
+               background: linear-gradient(#423a34, #292526 55%, #121010); transition: opacity .5s ease; }
+    #loading.done { opacity: 0; pointer-events: none; }
+    #loading-bg { position: absolute; inset: 0; background-size: cover; background-position: center;
+                  opacity: 0; transition: opacity 1.2s ease; }
+    #loading-bg.ready { opacity: 1; }
+    #loading-bg::after { content: ""; position: absolute; inset: 0;
+                         background: radial-gradient(ellipse at center, rgba(0,0,0,.3), rgba(0,0,0,.75)); }
+    #loading > * { position: relative; }
+    #loading .title { font: 96px "TF2 Build", Impact, sans-serif; color: #cf7336; line-height: 1;
+                      text-shadow: 3px 4px 0 rgba(0,0,0,.6); letter-spacing: 2px; }
+    #loading .panel { display: flex; align-items: center; gap: 22px; width: min(600px, 92vw); box-sizing: border-box;
+                      padding: 18px 26px 18px 18px; border: 2px solid #756b5e; border-radius: 8px;
+                      background: rgba(46,43,42,.94); box-shadow: 0 6px 16px rgba(0,0,0,.5); }
+    #loading .launcher { width: 104px; height: auto; flex: none; filter: drop-shadow(2px 3px 0 rgba(0,0,0,.5)); }
+    #loading .rows { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; text-align: left; }
+    #loading .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+    #loading .stage { font: 22px "TF2 Build", Impact, sans-serif; color: #ebe2ca; letter-spacing: 1px;
+                      text-shadow: 2px 2px 0 rgba(0,0,0,.6); white-space: nowrap; }
+    #loading .detail { font: 14px "TF2 Secondary", Verdana, sans-serif; color: #c8bba1; white-space: nowrap;
+                       font-variant-numeric: tabular-nums; }
+    #loading .bar { position: relative; height: 22px; border-radius: 4px; background: rgba(0,0,0,.45);
+                    box-shadow: inset 0 2px 4px rgba(0,0,0,.6); }
+    #loading .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px;
+                     background: linear-gradient(#f8dc6c, #f0cf4e 55%, #d9b53a);
+                     box-shadow: inset 0 -3px 0 rgba(0,0,0,.18); }
+    #loading .rocket { position: absolute; top: 50%; left: 0; width: 34px; height: auto;
+                       transform: translate(-40%, -50%) rotate(45deg);
+                       filter: drop-shadow(1px 2px 0 rgba(0,0,0,.5)); }
+    #loading .bar.indeterminate .fill { width: 30%; animation: slide 1.3s ease-in-out infinite alternate; }
+    #loading .bar.indeterminate .rocket { display: none; }
+    @keyframes slide { from { left: 0; } to { left: 70%; } }
+    #loading .message { max-width: min(600px, 92vw); min-height: 1.5em; font: 16px "TF2 Secondary", Verdana, sans-serif;
+                        text-shadow: 1px 1px 0 rgba(0,0,0,.6); }
+    #loading.failed .stage { color: #f45050; }
+    #loading.failed .fill { width: 100%; background: linear-gradient(#f45050, #f01e1e 55%, #b81717); animation: none; }
+    #loading.failed .rocket { display: none; }
+    #loading.failed .message { color: #ebe2ca; user-select: text; }
+    @media (max-width: 520px) {
+      #loading .title { font-size: 64px; }
+      #loading .launcher { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div id="loading-bg"></div>
+    <div class="title">endif.tf</div>
+    <div class="panel">
+      <img class="launcher" src="__ASSET_DIR__/ui/rocket_launcher.png" alt="" />
+      <div class="rows">
+        <div class="row">
+          <span class="stage" id="loading-stage">CONNECTING...</span>
+          <span class="detail" id="loading-detail"></span>
+        </div>
+        <div class="bar indeterminate" id="loading-bar">
+          <div class="fill" id="loading-fill"></div>
+          <img class="rocket" id="loading-rocket" src="__ASSET_DIR__/ui/soldier.png" alt="" />
+        </div>
+      </div>
+    </div>
+    <div class="message" id="loading-message"></div>
+  </div>
+  <canvas id="endif-canvas"></canvas>
+  <script>
+    (() => {
+      const contexts = [];
+      for (const name of ["AudioContext", "webkitAudioContext"]) {
+        const Original = window[name];
+        if (!Original) continue;
+        const Patched = function (...args) {
+          const ctx = new Original(...args);
+          contexts.push(ctx);
+          return ctx;
+        };
+        Patched.prototype = Original.prototype;
+        window[name] = Patched;
+      }
+      const resume = () => {
+        for (const ctx of contexts) {
+          if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        }
+      };
+      for (const ev of ["pointerdown", "keydown", "touchstart"]) {
+        window.addEventListener(ev, resume, { capture: true, passive: true });
+      }
+    })();
+
+    // Pointer lock with raw ("unadjusted") mouse deltas where the browser supports it. winit asks
+    // for the default mode, in which Chromium now and then reports the hidden cursor's re-centering
+    // warp as movementX/Y (mostly when frames are dropped), whipping the view around. Unadjusted
+    // movement reads the mouse directly, which also skips the OS pointer acceleration, like raw
+    // input in TF2. Browsers without the option fall back to a plain lock. Must run before the wasm
+    // module is loaded; wasm-bindgen looks the method up on each call.
+    //
+    // The same click takes the page fullscreen first when the "fullscreen on play" setting is on
+    // (endifSetFullscreenOnPlay, from the game's settings): that is what arms the keyboard lock
+    // above. The pointer lock is requested once the fullscreen transition has settled rather than
+    // in the same instant, since a fullscreen change can drop a lock that was taken during it; a
+    // refused or unavailable fullscreen (no user activation on an Esc resume, a denied request)
+    // falls through to the plain pointer lock. The document element is used, not the canvas, so
+    // winit's own fullscreen bookkeeping never sees it.
+    (() => {
+      let fullscreenOnPlay = false;
+      window.endifSetFullscreenOnPlay = (on) => { fullscreenOnPlay = !!on; };
+      const proto = window.Element && Element.prototype;
+      const original = proto && proto.requestPointerLock;
+      if (!original) return;
+      let unadjusted = true;
+      const plain = (el) => {
+        const r = original.call(el);
+        if (r && typeof r.catch === "function") r.catch(() => {});
+        return r;
+      };
+      const lock = function (el) {
+        if (!unadjusted) return plain(el);
+        let result;
+        try {
+          result = original.call(el, { unadjustedMovement: true });
+        } catch (e) {
+          unadjusted = false;
+          return plain(el);
+        }
+        if (result && typeof result.catch === "function") {
+          result.catch((e) => {
+            if (e && e.name === "NotSupportedError") {
+              unadjusted = false;
+              plain(el);
+            }
+          });
+        }
+        return result;
+      };
+      proto.requestPointerLock = function () {
+        const root = document.documentElement;
+        if (!fullscreenOnPlay || document.fullscreenElement || !root.requestFullscreen) return lock(this);
+        let fs;
+        try {
+          fs = root.requestFullscreen({ navigationUI: "hide" });
+        } catch (e) {
+          return lock(this);
+        }
+        if (!fs || typeof fs.then !== "function") return lock(this);
+        const el = this;
+        fs.then(() => lock(el), () => lock(el));
+        return fs;
+      };
+    })();
+
+    (() => {
+      const DOWNLOAD_END = 0.70, ASSETS_START = 0.75;
+      const CONTROL_FLOW = "Using exceptions for control flow"; 
+      const el = (id) => document.getElementById(id);
+      const root = el("loading"), bar = el("loading-bar"), fill = el("loading-fill"), rocket = el("loading-rocket");
+      const stage = el("loading-stage"), detail = el("loading-detail"), errorText = el("loading-message");
+      const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+      const kb = (n) => `${(n / 1024).toFixed(0)} KB`;
+      let finished = false, failed = false;
+
+      // Startup diagnostics. Every line is prefixed with the time since the page started loading so
+      // the console can be pasted as-is to see where the time goes.
+      const secs = () => (performance.now() / 1000).toFixed(2);
+      const log = (...args) => console.log(`[endif +${secs()}s]`, ...args);
+      window.endifLog = log;
+      const marks = {};
+      const mark = (name) => { marks[name] = performance.now(); };
+      const since = (a, b) => marks[a] !== undefined && marks[b] !== undefined ? `${((marks[b] - marks[a]) / 1000).toFixed(2)} s` : "?";
+      mark("page");
+      {
+        const conn = navigator.connection || {};
+        const navEntry = performance.getEntriesByType("navigation")[0] || {};
+        const env = {
+          userAgent: navigator.userAgent,
+          cores: navigator.hardwareConcurrency,
+          deviceMemoryGB: navigator.deviceMemory,
+          connection: conn.effectiveType,
+          downlinkMbps: conn.downlink,
+          protocol: navEntry.nextHopProtocol,
+          pageTransfer: navEntry.transferSize,
+          webgpu: !!navigator.gpu,
+          instantiateStreaming: typeof WebAssembly.instantiateStreaming === "function",
+          visible: document.visibilityState,
+          dpr: window.devicePixelRatio,
+        };
+        log("environment: " + Object.entries(env).map(([k, v]) => `${k}=${v}`).join("  "));
+      }
+      document.addEventListener("visibilitychange", () => log(`tab is now ${document.visibilityState} (a hidden tab loads much slower: the engine only runs when it is visible)`));
+      // A lobby host who switched tabs to send the invite cannot be told by the engine that the
+      // opponent arrived (it only runs while the tab is visible), but the signaling websocket keeps
+      // working in the background. Watch room sockets for the server's "NewPeer" event and announce
+      // it in the tab title until the host comes back.
+      {
+        const NativeWebSocket = window.WebSocket;
+        const baseTitle = document.title;
+        const Watched = function (url, protocols) {
+          const ws = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+          if (/\/endif-[A-Z0-9]+(\?|$)/.test(String(url))) {
+            window.endifRtcState = "";
+            ws.addEventListener("message", (e) => {
+              if (document.visibilityState === "hidden" && typeof e.data === "string" && e.data.includes("NewPeer")) {
+                document.title = "▶ opponent joined! — " + baseTitle;
+              }
+            });
+          }
+          return ws;
+        };
+        Watched.prototype = NativeWebSocket.prototype;
+        for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) Watched[k] = NativeWebSocket[k];
+        window.WebSocket = Watched;
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") document.title = baseTitle;
+        });
+      }
+      // The engine sees nothing between "opponent found" and "data channel open". Record the
+      // browser's ICE connection state (crates/client/src/net.rs reads window.endifRtcState for the
+      // lobby text) and log every candidate, so a peer connection that never comes up can be read
+      // off the console instead of guessed at.
+      {
+        const NativeRtc = window.RTCPeerConnection;
+        if (NativeRtc) {
+          const Traced = function (config, ...rest) {
+            // Firefox throws on an ICE server entry with no URLs (and matchbox unwraps that into a
+            // panic); drop such entries rather than take the whole game down.
+            if (config && Array.isArray(config.iceServers)) {
+              const servers = config.iceServers.filter((s) => s && (Array.isArray(s.urls) ? s.urls.length > 0 : !!s.urls));
+              if (servers.length !== config.iceServers.length) log("dropping ICE server entries without URLs");
+              config = { ...config, iceServers: servers };
+            }
+            const pc = new NativeRtc(config, ...rest);
+            window.endifRtcState = "new";
+            log("peer connection created; ice servers: " + JSON.stringify((config && config.iceServers) || []));
+            pc.addEventListener("icecandidate", (e) => {
+              const c = e.candidate;
+              log(c ? `local ice candidate: ${c.type} ${c.protocol} ${c.address}:${c.port}` : "local ice candidates: all gathered");
+            });
+            pc.addEventListener("icecandidateerror", (e) => log(`ice candidate error: ${e.url} ${e.errorCode} ${e.errorText}`));
+            pc.addEventListener("iceconnectionstatechange", () => {
+              window.endifRtcState = pc.iceConnectionState;
+              log(`ice connection state: ${pc.iceConnectionState}`);
+              if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+                pc.getStats().then((stats) => {
+                  stats.forEach((r) => {
+                    if (r.type === "candidate-pair" && r.state === "succeeded" && r.nominated) {
+                      const l = stats.get(r.localCandidateId), m = stats.get(r.remoteCandidateId);
+                      log(`connected to the opponent via ${l && l.candidateType} -> ${m && m.candidateType} ${m && m.address}:${m && m.port}`);
+                    }
+                  });
+                }).catch(() => {});
+              }
+            });
+            pc.addEventListener("connectionstatechange", () => {
+              if (pc.connectionState === "closed") window.endifRtcState = "";
+            });
+            return pc;
+          };
+          Traced.prototype = NativeRtc.prototype;
+          Object.setPrototypeOf(Traced, NativeRtc);
+          window.RTCPeerConnection = Traced;
+        }
+      }
+      const short = (name) => `${name}`.replace(location.origin, "").split("?")[0];
+      const resources = [];
+      if (window.PerformanceObserver) {
+        try {
+          new PerformanceObserver((list) => {
+            for (const e of list.getEntries()) {
+              if (e.entryType !== "resource") continue;
+              resources.push(e);
+              const cached = e.transferSize === 0 && e.decodedBodySize > 0;
+              const size = e.decodedBodySize
+                ? `${kb(e.transferSize)} on the wire / ${kb(e.decodedBodySize)} decoded${cached ? " (cache)" : ""}`
+                : "size unknown";
+              const queued = e.requestStart ? (e.requestStart - e.startTime).toFixed(0) : "?";
+              const waiting = e.requestStart ? (e.responseStart - e.requestStart).toFixed(0) : "?";
+              const receiving = e.responseStart ? (e.responseEnd - e.responseStart).toFixed(0) : "?";
+              log(`fetched ${short(e.name)}: ${e.duration.toFixed(0)} ms total (queued ${queued}, waiting ${waiting}, receiving ${receiving}), ${size}, ${e.nextHopProtocol || "?"}`);
+            }
+          }).observe({ type: "resource", buffered: true });
+        } catch (e) {
+          log("resource timing unavailable:", e);
+        }
+      }
+      const summary = () => {
+        log(`startup summary: wasm download ${since("fetch", "downloaded")} (headers after ${since("fetch", "headers")}), ` +
+          `compile + instantiate + main() ${since("downloaded", "init")}, engine start to first asset report ${since("init", "firstProgress")}, ` +
+          `assets + warm-up ${since("firstProgress", "finish")}, total ${since("page", "finish")}`);
+        const slow = resources.slice().sort((a, b) => b.duration - a.duration).slice(0, 10);
+        log("slowest fetches: " + slow.map((e) => `${short(e.name)} ${e.duration.toFixed(0)} ms`).join(", "));
+        const total = resources.reduce((n, e) => n + (e.transferSize || 0), 0);
+        log(`${resources.length} resources fetched, ${mb(total)} on the wire`);
+      };
+
+      let lastStage = "";
+      const set = (text, fraction, info = "") => {
+        if (finished || failed) return;
+        if (text !== lastStage) {
+          lastStage = text;
+          log(`stage: ${text}`);
+        }
+        stage.textContent = text;
+        detail.textContent = info;
+        const known = fraction !== null && Number.isFinite(fraction);
+        bar.classList.toggle("indeterminate", !known);
+        if (known) {
+          const pct = Math.max(0, Math.min(100, fraction * 100));
+          fill.style.width = `${pct}%`;
+          rocket.style.left = `${pct}%`;
+        }
+      };
+      const fail = (message) => {
+        if (finished || failed) return;
+        failed = true;
+        root.classList.add("failed");
+        bar.classList.remove("indeterminate");
+        fill.style.width = "";
+        stage.textContent = "FAILED TO START";
+        detail.textContent = "";
+        errorText.textContent = `${message}`.slice(0, 400) + " (details in the browser console)";
+        console.error("endif.tf failed to start:", message);
+      };
+      const finish = () => {
+        if (finished || failed) return;
+        set("READY", 1);
+        mark("finish");
+        summary();
+        finished = true;
+        root.classList.add("done");
+        setTimeout(() => root.remove(), 600);
+      };
+
+      const bg = new Image();
+      bg.onload = () => {
+        log("loading screen background ready");
+        el("loading-bg").style.backgroundImage = `url("${bg.src}")`;
+        el("loading-bg").classList.add("ready");
+      };
+      bg.src = "__ASSET_DIR__/ui/menu_bg.png";
+
+      const downloadWasm = async (url, expected) => {
+        mark("fetch");
+        log(`fetching wasm ${short(url)} (expected ${mb(expected)} uncompressed)`);
+        const res = await fetch(url);
+        mark("headers");
+        const enc = res.headers.get("content-encoding");
+        log(`wasm response: HTTP ${res.status}, content-type=${res.headers.get("content-type")}, content-encoding=${enc || "none (the server is not compressing it)"}, content-length=${res.headers.get("content-length")}, cache-control=${res.headers.get("cache-control")}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} fetching ${url}`);
+        if (!res.body) return res;
+        let total = expected || 0;
+        if (!total && !res.headers.get("content-encoding")) total = Number(res.headers.get("content-length")) || 0;
+        let received = 0, nextLog = 0;
+        set("DOWNLOADING GAME", total ? 0 : null, total ? `0.0 MB / ${mb(total)}` : "");
+        const reader = res.body.getReader();
+        const body = new ReadableStream({
+          async pull(controller) {
+            const { done, value } = await reader.read();
+            if (done) {
+              mark("downloaded");
+              const s = (marks.downloaded - marks.fetch) / 1000;
+              log(`wasm downloaded: ${mb(received)} in ${s.toFixed(2)} s (${(received / 1048576 / s).toFixed(1)} MB/s uncompressed); compiling`);
+              set("STARTING ENGINE", DOWNLOAD_END + (ASSETS_START - DOWNLOAD_END) * 0.5, "");
+              controller.close();
+              return;
+            }
+            received += value.byteLength;
+            if (total && received >= nextLog) {
+              log(`wasm download ${mb(received)} / ${mb(total)}`);
+              nextLog += total / 10;
+            }
+            if (total) {
+              const shown = Math.min(received, total);
+              set("DOWNLOADING GAME", DOWNLOAD_END * (shown / total), `${mb(shown)} / ${mb(total)}`);
+            } else {
+              set("DOWNLOADING GAME", null, mb(received));
+            }
+            controller.enqueue(value);
+          },
+          cancel(reason) { return reader.cancel(reason); },
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "application/wasm" } });
+      };
+
+      window.endifProgress = (loaded, total) => {
+        if (marks.firstProgress === undefined) mark("firstProgress");
+        log(`engine reports startup assets ${loaded} / ${total}`);
+        const fraction = total ? loaded / total : 1;
+        set("LOADING ASSETS", ASSETS_START + (1 - ASSETS_START) * fraction, `${loaded} / ${total}`);
+        if (loaded >= total) finish();
+      };
+      window.endifLoading = { downloadWasm, fail, CONTROL_FLOW, mark };
+
+      window.addEventListener("error", (e) => {
+        const msg = `${e.message || e.error || e}`;
+        if (!msg.includes(CONTROL_FLOW)) fail(msg);
+      });
+      window.addEventListener("unhandledrejection", (e) => {
+        const msg = `${e.reason}`;
+        if (!msg.includes(CONTROL_FLOW)) fail(msg);
+      });
+    })();
+  </script>
+  <script type="module">
+    // Two builds ship (build-web.sh): endif-webgpu for browsers that hand out a WebGPU adapter and
+    // endif-webgl2 for the rest. Only the chosen one is downloaded. `?backend=webgl2|webgpu`
+    // forces a choice; a WebGPU build that fails to start reloads once with the WebGL2 one.
+    const { downloadWasm, fail, CONTROL_FLOW, mark } = window.endifLoading;
+    const log = window.endifLog;
+    const params = new URLSearchParams(location.search);
+    const forced = params.get("backend");
+    const WASM_BYTES = { webgpu: Number("__WASM_BYTES_WEBGPU__") || 0, webgl2: Number("__WASM_BYTES_WEBGL2__") || 0 };
+    const pickBackend = async () => {
+      if (forced === "webgl2" || forced === "webgpu") return [forced, "forced by ?backend="];
+      if (!navigator.gpu) {
+        return ["webgl2", window.isSecureContext
+          ? "navigator.gpu is missing (this browser has no WebGPU)"
+          : "navigator.gpu is missing: WebGPU needs a secure context (https:// or localhost)"];
+      }
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        return adapter ? ["webgpu", "WebGPU adapter available"] : ["webgl2", "navigator.gpu.requestAdapter() returned null"];
+      } catch (e) {
+        return ["webgl2", `navigator.gpu.requestAdapter() failed: ${e}`];
+      }
+    };
+    const started = () => {
+      mark("init");
+      log("wasm compiled and instantiated, main() has run; waiting for the engine's first frame");
+    };
+    (async () => {
+      const [backend, why] = await pickBackend();
+      log(`renderer backend: ${backend} (${why})`);
+      try {
+        const { default: init } = await import(`./endif-${backend}.js?v=__BUILD_ID__`);
+        log("wasm-bindgen glue loaded, starting init()");
+        await init({ module_or_path: downloadWasm(new URL(`./endif-${backend}_bg.wasm?v=__BUILD_ID__`, import.meta.url), WASM_BYTES[backend]) });
+        started();
+      } catch (e) {
+        if (`${e}`.includes(CONTROL_FLOW)) {
+          started();
+          return;
+        }
+        if (backend === "webgpu" && !forced) {
+          log(`WebGPU build failed to start (${e}); reloading with the WebGL2 build`);
+          params.set("backend", "webgl2");
+          location.replace(`${location.pathname}?${params}${location.hash}`);
+          return;
+        }
+        fail(e);
+        throw e;
+      }
+    })();
+  </script>
+</body>
+</html>

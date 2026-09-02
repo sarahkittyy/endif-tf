@@ -1,0 +1,46 @@
+[package]
+name = "endif-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Browser graphics API for the wasm build; `build-web.sh` builds one wasm per backend. Bevy picks
+# WebGPU at compile time whenever that feature is on, so enable exactly one. Desktop needs neither.
+webgl2 = ["bevy/webgl2"]
+webgpu = ["bevy/webgpu"]
+
+[dependencies]
+endif-sim = { path = "../sim" }
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_winit", "bevy_window", "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_ui", "bevy_text",
+    "bevy_asset", "bevy_log", "bevy_state", "bevy_gizmos", "bevy_ui_render", "default_font", "png",
+    "x11", "wayland", "serialize", "bevy_audio", "vorbis", "tonemapping_luts", "zstd_rust", "multi_threaded", "bevy_input_focus", "std", "async_executor", "bevy_scene", "bevy_gltf", "bevy_animation", "gltf_animation", "bevy_world_serialization", "reflect_auto_register", "system_clipboard",
+] }
+bevy_ggrs = "0.22"
+ggrs = "0.13"
+matchbox_socket = "0.14"
+serde = { workspace = true }
+serde_json = "1"
+bincode = { version = "1.3" }
+bytemuck = { workspace = true }
+log = { workspace = true }
+rand = "0.8"
+futures = "0.3"
+ehttp = "0.7.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Location", "History", "Storage", "Document", "Element"] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+bevy_ggrs = { version = "0.22", features = ["wasm-bindgen"] }
+ggrs = { version = "0.13", features = ["wasm-bindgen"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-compat = "0.2"
+winit = { version = "0.30", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+dotenvy = "0.15.7"

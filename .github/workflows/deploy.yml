@@ -1,0 +1,149 @@
+# Production deploy of endif.tf.
+#
+#   server     on the self-hosted runner on sarahvps2: checkout in place, run the migrations,
+#              build endif-server and the web client, publish dist/, install the nginx and
+#              supervisord configs from deploy/, restart the server.
+#   desktop    on GitHub's hosted runners: release builds for Windows and Linux, packaged by
+#              deploy/package-desktop.sh and uploaded as artifacts.
+#   downloads  back on sarahvps2: copies those packages to /srv/endif/download, which nginx serves
+#              as https://endif.tf/download/{windows,linux}.
+#
+# One-time setup on the box is described in the README ("Deployment"). The production .env lives
+# at /srv/endif/.env and is symlinked into the checkout; nothing secret is stored on GitHub.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "tools/tf2/**"
+      - ".claude/**"
+  workflow_dispatch:
+
+# One deploy at a time; a second push waits instead of racing the first.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  # Compiled into the desktop clients (option_env!); the web build takes it from /srv/endif/.env.
+  ENDIF_SIGNALING: wss://endif.tf
+
+jobs:
+  server:
+    name: server + web (sarahvps2)
+    runs-on: sarah-vps2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The checkout persists between runs; keep target/ (incremental builds) and dist/.
+          clean: false
+
+      - name: Link the production .env
+        run: ln -sfn /srv/endif/.env .env
+
+      - name: Prepare the database
+        run: |
+          source ~/.profile
+          # .env is not shell syntax (MAIL_FROM has a <>), so pull the one value out.
+          export DATABASE_URL="$(grep '^DATABASE_URL=' .env | cut -d= -f2-)"
+          sqlx database create
+          sqlx migrate run --source crates/server/migrations
+
+      - name: Build the server
+        run: |
+          source ~/.profile
+          cargo build --release -p endif-server
+
+      - name: Build the web client
+        run: |
+          source ~/.profile
+          bash ./build-web.sh
+
+      - name: Publish the web client
+        run: rsync -a --delete dist/ /srv/endif/dist/
+
+      - name: nginx
+        run: |
+          if ! sudo cmp -s deploy/nginx/endif.tf.conf /etc/nginx/sites-available/endif.tf; then
+            sudo cp deploy/nginx/endif.tf.conf /etc/nginx/sites-available/endif.tf
+            sudo ln -sfn /etc/nginx/sites-available/endif.tf /etc/nginx/sites-enabled/endif.tf
+            sudo nginx -t
+            sudo systemctl reload nginx
+          fi
+
+      - name: Restart the server
+        run: |
+          sed "s|__WORKSPACE__|$GITHUB_WORKSPACE|g" deploy/supervisor/endif-server.conf > /etc/supervisor/conf.d/endif-server.conf
+          sudo supervisorctl reread
+          sudo supervisorctl update
+          sudo supervisorctl restart endif-server
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS https://endif.tf/health >/dev/null; then
+              echo "server: $(curl -fsS https://endif.tf/version)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "endif-server did not come up:"
+          tail -n 40 /var/log/supervisor/endif-server-error.log
+          exit 1
+
+  desktop:
+    name: desktop (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+          - name: linux
+            # 22.04 rather than latest: the binary needs the glibc it was built against or newer.
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.name }}
+
+      - name: Linux build dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev pkg-config
+
+      - name: Build and package
+        shell: bash
+        run: bash deploy/package-desktop.sh ${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endif-${{ matrix.name }}
+          path: out/endif-${{ matrix.name }}.*
+          if-no-files-found: error
+
+  downloads:
+    name: publish downloads (sarahvps2)
+    needs: desktop
+    runs-on: sarah-vps2
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: endif-*
+          merge-multiple: true
+          path: /srv/endif/download-stage
+
+      - name: Install
+        run: |
+          install -m 644 /srv/endif/download-stage/* /srv/endif/download/
+          rm -rf /srv/endif/download-stage
+          ls -l /srv/endif/download/

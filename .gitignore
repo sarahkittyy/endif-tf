@@ -1,0 +1,12 @@
+/target
+/dist
+*.log
+/.env
+**/__pycache__
+/out
+/crates/mge.sp
+/crates/tf_player.cpp
+/crates/tf_weaponbase_rocket.cpp
+/tools/tf2
+/web/nginx
+/deploy

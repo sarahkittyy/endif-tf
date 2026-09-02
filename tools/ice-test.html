@@ -1,0 +1,27 @@
+<!doctype html>
+<title>ICE gathering test</title>
+<pre id="out">running...</pre>
+<script>
+const out = document.getElementById("out");
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join("\n"); };
+log(navigator.userAgent);
+log(`page: ${location.href}`);
+const ice = [{
+  urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "turn:endif.tf:3478"],
+  username: "endif", credential: "2cedf86bb9ef5599bff1f43cd3c54b76",
+}];
+const t0 = performance.now();
+const pc = new RTCPeerConnection({ iceServers: ice });
+pc.createDataChannel("x");
+pc.onicecandidate = (e) => {
+  const t = ((performance.now() - t0) / 1000).toFixed(1);
+  if (!e.candidate) { log(`${t}s: gathering complete`); window.__done = true; return; }
+  const c = e.candidate;
+  log(`${t}s: ${c.type} ${c.protocol} ${c.address}:${c.port} (relay=${c.relatedAddress || "-"})`);
+};
+pc.onicegatheringstatechange = () => log(`gathering state: ${pc.iceGatheringState}`);
+pc.onicecandidateerror = (e) => log(`candidate error: url=${e.url} code=${e.errorCode} ${e.errorText}`);
+pc.createOffer().then((o) => pc.setLocalDescription(o)).then(() => log("offer set, gathering..."));
+window.__lines = lines;
+</script>

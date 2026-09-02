@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = ["crates/sim", "crates/client", "crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive"] }
+libm = "0.2"
+log = "0.4"
+
+# Optimise dependencies even in debug builds; Bevy is unusably slow otherwise.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+debug = false
+strip = true
+
+[profile.wasm-dev]
+inherits = "dev"
+debug = false
+strip = "debuginfo"
+
+[profile.wasm-release.package.png]
+opt-level = 3
+[profile.wasm-release.package.fdeflate]
+opt-level = 3
+[profile.wasm-release.package.miniz_oxide]
+opt-level = 3
+[profile.wasm-release.package.flate2]
+opt-level = 3
+[profile.wasm-release.package.image]
+opt-level = 3
+[profile.wasm-release.package.lewton]
+opt-level = 3
+[profile.wasm-release.package.gltf]
+opt-level = 3
+[profile.wasm-release.package.gltf-json]
+opt-level = 3
+[profile.wasm-release.package.serde_json]
+opt-level = 3

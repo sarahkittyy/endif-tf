@@ -1,0 +1,18 @@
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: pawsword
+      MARIADB_DATABASE: endif
+    ports:
+      - "3306:3306"
+    volumes:
+      - endif-db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  endif-db:

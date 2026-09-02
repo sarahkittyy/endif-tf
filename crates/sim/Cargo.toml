@@ -1,0 +1,11 @@
+[package]
+name = "endif-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic TF2-accurate simulation for endif (soldier 1v1 airshot minigame)"
+
+[dependencies]
+serde = { workspace = true }
+bytemuck = { workspace = true }
+libm = { workspace = true }
