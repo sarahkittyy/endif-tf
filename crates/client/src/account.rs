@@ -904,6 +904,12 @@ fn ranked_exit(
     if ranked.reported {
         return;
     }
+    // Our socket died (the signaling server restarted): neither side left, so there is no
+    // forfeit to claim; the server settles the match from the other report or its grace period.
+    if exit.connection_lost {
+        info!("ranked match {} lost its connection; leaving it to the server", info.match_id);
+        return;
+    }
     let score = states.as_ref().map(|s| [s.cur.players[0].score, s.cur.players[1].score]).unwrap_or([0, 0]);
     let winner_handle = if exit.opponent_left { local.0 } else { 1 - local.0 };
     let (score, winner) = report_for(info, local.0, score, winner_handle);

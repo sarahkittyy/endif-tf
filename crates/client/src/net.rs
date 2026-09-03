@@ -87,6 +87,9 @@ impl PlayerNames {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MatchExit {
     pub opponent_left: bool,
+    /// Our own socket died under us (the signaling server restarted for a deploy, say): nobody
+    /// left, so nobody forfeits.
+    pub connection_lost: bool,
 }
 
 /// Outcome of a socket's signaling loop once it has ended (`None` while it is still running).
@@ -391,6 +394,8 @@ pub enum NetCommand {
 /// impairment between the two.
 pub struct GgrsChannel {
     chan: WebRtcChannel,
+    /// The socket's background future has ended, so nothing can be sent any more (logged once).
+    dead: bool,
     #[cfg(feature = "netsim")]
     sim: Option<crate::netsim::Impaired>,
 }
@@ -401,8 +406,20 @@ impl GgrsChannel {
         let _ = cfg;
         GgrsChannel {
             chan,
+            dead: false,
             #[cfg(feature = "netsim")]
             sim: cfg.netsim.map(crate::netsim::Impaired::new),
+        }
+    }
+
+    /// Hands a packet to matchbox. Its `send` panics once the socket's background future is
+    /// gone, which happens when the signaling connection drops (matchbox ends the data channel
+    /// pump with it, even though WebRTC itself no longer needs signaling), so this uses the
+    /// fallible variant and lets `watch_session` end the match.
+    fn send(&mut self, packet: Box<[u8]>, peer: PeerId) {
+        if self.chan.try_send(packet, peer).is_err() && !self.dead {
+            self.dead = true;
+            warn!("game channel closed (socket future gone); dropping outgoing packets");
         }
     }
 
@@ -411,7 +428,7 @@ impl GgrsChannel {
         #[cfg(feature = "netsim")]
         if let Some(sim) = &mut self.sim {
             for (peer, packet) in sim.out.drain_due() {
-                self.chan.send(packet, peer);
+                self.send(packet, peer);
             }
         }
     }
@@ -432,7 +449,7 @@ impl bevy_ggrs::ggrs::NonBlockingSocket<PeerId> for GgrsChannel {
             self.flush();
             return;
         }
-        self.chan.send(bytes, *addr);
+        self.send(bytes, *addr);
     }
 
     fn receive_all_messages(&mut self) -> Vec<(PeerId, bevy_ggrs::ggrs::Message)> {
@@ -893,7 +910,11 @@ fn poll_room(
     names.0 = if local_handle == 0 { [my_name.clone(), their_name] } else { [their_name, my_name.clone()] };
     let mut hello = vec![MSG_HELLO];
     hello.extend_from_slice(my_name.as_bytes());
-    socket.channel_mut(CHAT_CHANNEL).send(hello.into_boxed_slice(), remote_id);
+    if socket.channel_mut(CHAT_CHANNEL).try_send(hello.into_boxed_slice(), remote_id).is_err() {
+        warn!("could not send hello: socket closed; leaving room {}", room.code);
+        room.failure = Some(RoomFailure::Refused);
+        return;
+    }
 
     let channel = match socket.take_channel(GAME_CHANNEL) {
         Ok(c) => c,
@@ -924,7 +945,7 @@ fn poll_room(
 #[allow(clippy::too_many_arguments)]
 fn watch_session(
     session: Option<ResMut<Session<Config>>>,
-    room: Option<ResMut<RoomConnection>>,
+    mut room: Option<ResMut<RoomConnection>>,
     local: Res<LocalHandle>,
     mut names: ResMut<PlayerNames>,
     mut exit: ResMut<MatchExit>,
@@ -934,8 +955,19 @@ fn watch_session(
     time: Res<Time<Real>>,
 ) {
     // matchbox reports the WebRTC connection itself going away (tab closed, ICE failed) without
-    // waiting out the GGRS silence timeout. Errors here mean the signaling connection is gone,
-    // which does not matter once the peers talk directly.
+    // waiting out the GGRS silence timeout. Its socket future also ends when the signaling
+    // connection drops (a server restart for a deploy), and it takes the data channel pump with
+    // it even though the peers talk directly by now: the channels are dead from then on, so the
+    // match ends here rather than in a panic in the next send.
+    if let Some(room) = room.as_deref_mut() {
+        if room.socket.is_some() && room.loop_result.lock().unwrap().is_some() {
+            warn!("socket future ended during the match (signaling connection lost); leaving");
+            status.text = "connection lost".to_string();
+            exit.connection_lost = true;
+            room.socket = None;
+            next.set(AppState::Menu);
+        }
+    }
     if let Some(mut room) = room
         && let Some(socket) = room.socket.as_mut()
     {
