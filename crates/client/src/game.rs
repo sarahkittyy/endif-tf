@@ -42,19 +42,34 @@ pub struct LookAngles {
     pub yaw: f32,
 }
 
-/// Simulation events for the presentation layer this frame.
+/// Simulation events for the presentation layer this frame, on two paths.
 ///
-/// A rollback re-steps frames that were already simulated once. Events from those frames were
-/// mostly surfaced the first time around, but anything that only exists because of a late remote
-/// input (their rocket firing, flying and exploding before the input arrived) has never been seen.
-/// `played` remembers, per frame, which events were already handed out so that a re-simulated frame
-/// surfaces only what is new for it. Events that were played in prediction and then didn't happen
-/// cannot be taken back; that is the usual rollback trade-off.
+/// `events` is the immediate path, for sounds, particles and the view model: they have to play
+/// the tick they happen, so they come from predicted frames. A rollback re-steps frames that were
+/// already simulated once. Events from those frames were mostly surfaced the first time around,
+/// but anything that only exists because of a late remote input (their rocket firing, flying and
+/// exploding before the input arrived) has never been seen. `played` remembers, per frame, which
+/// events were already handed out so that a re-simulated frame surfaces only what is new for it.
+/// Events that were played in prediction and then didn't happen cannot be taken back; that is
+/// the usual rollback trade-off.
+///
+/// `confirmed` is the exact path, for the kill feed and round results: events of frames GGRS has
+/// every player's input for, in frame order. Nothing is predicted there, so a kill that moved a
+/// tick under rollback appears once, with the distance and chain both peers agree on, at the cost
+/// of the prediction window's few ticks of delay. Frames wait in `pending` until confirmed; a
+/// re-simulated frame replaces its buffer.
 #[derive(Resource, Default)]
 pub struct PendingFx {
     pub events: Vec<SimEvent>,
     /// Sorted by frame. Bounded to the frames a rollback can still reach.
     played: std::collections::VecDeque<(i32, Vec<FxKey>)>,
+    /// Events of confirmed frames, released this Bevy frame.
+    pub confirmed: Vec<SimEvent>,
+    /// Events of frames simulated but not yet confirmed, sorted by frame.
+    pending: std::collections::VecDeque<(i32, Vec<SimEvent>)>,
+    /// The last frame released to `confirmed`. A sync-test session re-simulates frames behind
+    /// this on purpose; those are ignored rather than surfaced twice.
+    released: i32,
 }
 
 /// Identity of an event for de-duplication across re-simulations. Rocket ids and positions are
@@ -118,7 +133,38 @@ impl PendingFx {
                 self.events.push(ev.clone());
             }
         }
+
+        if frame <= self.released {
+            return;
+        }
+        match self.pending.binary_search_by_key(&frame, |(f, _)| *f) {
+            Ok(i) => self.pending[i].1 = events.to_vec(),
+            Err(i) => self.pending.insert(i, (frame, events.to_vec())),
+        }
     }
+
+    /// Moves the events of every pending frame up to `through` into `confirmed`.
+    fn release(&mut self, through: i32) {
+        while self.pending.front().is_some_and(|(f, _)| *f <= through) {
+            let (_, events) = self.pending.pop_front().unwrap();
+            self.confirmed.extend(events);
+        }
+        self.released = self.released.max(through);
+    }
+}
+
+/// Releases the events of frames whose inputs are all known. Runs right after GGRS, which has
+/// already re-simulated any frame a late input changed, so the buffers of frames up to its
+/// confirmed frame are final. GGRS numbers a frame by the inputs it consumes while
+/// `RollbackFrameCount` numbers the state those inputs produce, hence the `+ 1`. A sync-test
+/// session has no remote inputs to wait for.
+fn release_confirmed_fx(mut fx: ResMut<PendingFx>, session: Option<Res<Session<Config>>>, frame: Option<Res<RollbackFrameCount>>) {
+    let Some(frame) = frame else { return };
+    let through = match session.as_deref() {
+        Some(Session::P2P(s)) => s.confirmed_frame() + 1,
+        _ => i32::from(*frame),
+    };
+    fx.release(through);
 }
 
 /// Whether the mouse is captured for looking. On the web this is reconciled with the browser's
@@ -196,6 +242,7 @@ impl Plugin for GamePlugin {
                     .before(RunGgrsSystems)
                     .run_if(in_state(AppState::InGame)),
             )
+            .add_systems(PreUpdate, release_confirmed_fx.after(RunGgrsSystems).run_if(in_state(AppState::InGame)))
             .add_systems(Last, clear_fx)
             .add_systems(Update, (dev_tools, log_long_frames));
         #[cfg(target_arch = "wasm32")]
@@ -449,6 +496,7 @@ fn step_sim(
 /// Events are consumed by every presentation system during the frame, then cleared.
 fn clear_fx(mut fx: ResMut<PendingFx>) {
     fx.events.clear();
+    fx.confirmed.clear();
 }
 
 /// Reports frames that took far longer than a tick, with how long the current state has been

@@ -677,7 +677,11 @@ fn slider_controls(
     ))
     .with_children(|b| {
         // "8 (133 ms)" is too long for the box at the usual size.
-        let size = if slider == Slider::InputDelay { 12.0 } else { 16.0 };
+        let size = if slider == Slider::InputDelay {
+            12.0
+        } else {
+            16.0
+        };
         b.spawn((
             ValueText(axis),
             theme.heading_flat(slider.display(s), size, theme::YELLOW),
@@ -757,8 +761,20 @@ fn icon_cell(image: Handle<Image>, active: bool) -> impl Bundle {
         },
         BackgroundColor(if active { theme::ORANGE } else { Color::NONE }),
         children![(
-            ImageNode { image, color: if active { Color::WHITE } else { Color::srgba(1.0, 1.0, 1.0, 0.4) }, ..default() },
-            Node { width: Val::Px(LAUNCHER_ICON_W), height: Val::Px(LAUNCHER_ICON_H), ..default() },
+            ImageNode {
+                image,
+                color: if active {
+                    Color::WHITE
+                } else {
+                    Color::srgba(1.0, 1.0, 1.0, 0.4)
+                },
+                ..default()
+            },
+            Node {
+                width: Val::Px(LAUNCHER_ICON_W),
+                height: Val::Px(LAUNCHER_ICON_H),
+                ..default()
+            },
         )],
     )
 }
@@ -1283,14 +1299,22 @@ fn spawn_tabs(c: &mut RelatedSpawnerCommands<ChildOf>, theme: &Theme, selected: 
         Val::Auto,
         Val::Px(PANEL_BORDER + gap_top + PANEL_BORDER),
         BorderRadius::top_right(Val::Px(theme::PANEL_RADIUS)),
-        UiRect { top: b, right: b, ..UiRect::ZERO },
+        UiRect {
+            top: b,
+            right: b,
+            ..UiRect::ZERO
+        },
     ));
     c.spawn(piece(
         Val::Px(gap_top + TAB_H - PANEL_BORDER),
         Val::Px(-PANEL_BORDER),
         Val::Auto,
         BorderRadius::bottom_right(Val::Px(theme::PANEL_RADIUS)),
-        UiRect { bottom: b, right: b, ..UiRect::ZERO },
+        UiRect {
+            bottom: b,
+            right: b,
+            ..UiRect::ZERO
+        },
     ));
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         let on = tab == selected;
@@ -2016,7 +2040,10 @@ fn spawn_settings(
                 c.spawn(section(theme, "loadout"));
                 row(c, theme, "Preferred rocket launcher", |b| {
                     b.spawn(icon_switch(
-                        [theme.launcher_stock.clone(), theme.launcher_original.clone()],
+                        [
+                            theme.launcher_stock.clone(),
+                            theme.launcher_original.clone(),
+                        ],
                         s.weapon == Weapon::Stock,
                         UiAction::Launcher,
                     ));
@@ -2612,7 +2639,14 @@ fn spawn_profile(
                     ..default()
                 })
                 .with_children(|x| {
-                    spawn_field(x, theme, form, Field::HistorySearch, "search opponent", 200.0);
+                    spawn_field(
+                        x,
+                        theme,
+                        form,
+                        Field::HistorySearch,
+                        "search opponent",
+                        200.0,
+                    );
                     x.spawn(switch(
                         theme,
                         ["COMP", "ALL"],
@@ -3735,16 +3769,16 @@ fn setup_connecting(
                     }))
                     .with_children(|b| {
                         b.spawn((
-                            theme.heading(
-                                code_display(&code, ROOM_CODE_LEN),
-                                64.0,
-                                theme::YELLOW,
-                            ),
+                            theme.heading(code_display(&code, ROOM_CODE_LEN), 64.0, theme::YELLOW),
                             no_wrap(),
                         ));
                     });
                     // `join_link` is a link on the web and the bare code on desktop.
-                    let what = if cfg!(target_arch = "wasm32") { "link" } else { "code" };
+                    let what = if cfg!(target_arch = "wasm32") {
+                        "link"
+                    } else {
+                        "code"
+                    };
                     c.spawn(theme.label(
                         format!("share this {what} to invite someone:"),
                         14.0,
@@ -3800,6 +3834,9 @@ fn connecting_phase(
     } else if let Some(state) = room.peer_status() {
         // Web: the browser's ICE state while the direct connection to the opponent comes up.
         format!("OPPONENT FOUND, CONNECTING... ({state})")
+    } else if room.opponent_found() {
+        // Desktop, or a browser whose handshake has not started: the opponent is in the room.
+        "OPPONENT FOUND, CONNECTING...".to_string()
     } else if room.connected {
         "WAITING FOR THE OPPONENT...".to_string()
     } else {
@@ -3842,15 +3879,15 @@ fn connecting_screen(
     let (title, hint) = match failure {
         RoomFailure::Full => (
             "ERROR: ROOM IS FULL.",
-            "two players are already in this room. Ask the host for a fresh link, or create your own room.",
+            "two players are already in this room.",
         ),
         RoomFailure::Refused => (
             "ERROR: COULD NOT JOIN THE ROOM.",
-            "the matchmaking server refused the connection. This happens after many attempts in a short time from one network; wait a moment and try again.",
+            "the matchmaking server refused the connection. wait a moment and try again.",
         ),
         RoomFailure::Unreachable => (
             "ERROR: CANNOT REACH THE MATCHMAKING SERVER.",
-            "the room was lost; try again once the server is back.",
+            "try again once the server is back.",
         ),
         RoomFailure::Outdated => (
             "ERROR: THIS BUILD IS OUT OF DATE.",
@@ -3866,7 +3903,7 @@ fn connecting_screen(
         ),
         RoomFailure::PeerUnreachable => (
             "ERROR: COULD NOT CONNECT TO THE OPPONENT.",
-            "the opponent was found but no connection between your browsers came up. A firewall, VPN or a network that blocks UDP usually causes this; /ice-test.html on this site shows what each side can reach.",
+            "the opponent was found but no connection between you came up.",
         ),
         RoomFailure::Checking => unreachable!(),
     };

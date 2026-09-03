@@ -853,7 +853,7 @@ fn ranked_round_end(
     let Some(MatchKind::Ranked(info)) = kind.as_deref() else { return };
     let now = time.elapsed_secs_f64();
     if !ranked.reported {
-        for ev in &fx.events {
+        for ev in &fx.confirmed {
             if let SimEvent::RoundWon { winner, score } = ev {
                 let won = *winner as usize == local.0;
                 let (score, winner) = report_for(info, local.0, *score, *winner as usize);
@@ -878,7 +878,7 @@ fn ranked_round_end(
 /// and a round abandoned part-way is not recorded. The opponent is known by display name only.
 fn casual_round_end(fx: Res<PendingFx>, kind: Option<Res<MatchKind>>, local: Res<LocalHandle>, names: Res<PlayerNames>, cfg: Res<ClientConfig>, mut account: ResMut<Account>) {
     let (Some(MatchKind::Room { code }) | Some(MatchKind::Quick(QuickMatch { room: code, .. }))) = kind.as_deref() else { return };
-    for ev in &fx.events {
+    for ev in &fx.confirmed {
         if let SimEvent::RoundWon { winner, score } = ev {
             let me = local.0;
             let opponent = names.0[1 - me].trim();

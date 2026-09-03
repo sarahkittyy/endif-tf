@@ -38,6 +38,17 @@ pub const DISCONNECT_NOTIFY_START: Duration = Duration::from_millis(1000);
 /// room for the rest of the day. (Only counted while the engine runs, i.e. the tab is visible.)
 pub const LOBBY_TIMEOUT_MINUTES: u64 = 30;
 const LOBBY_TIMEOUT: f64 = LOBBY_TIMEOUT_MINUTES as f64 * 60.0;
+/// Once the opponent is known to be in the room, how long the peer connection gets to come up
+/// before the lobby gives up with [`RoomFailure::PeerUnreachable`]. ICE settles within a few
+/// seconds even over the relay. Without this a browser opponent whose WebRTC gathers no candidate
+/// at all (Opera GX with its VPN on, "disable non-proxied UDP") kept the lobby at "waiting for the
+/// opponent" until [`LOBBY_TIMEOUT`]: the ICE agent has no pair to fail on, so it never reports
+/// `failed`, and matchbox itself never gives up on a handshake.
+const PEER_CONNECT_TIMEOUT: f64 = 30.0;
+/// How often a private lobby asks `/api/room/<code>` whether the opponent has arrived. Desktop
+/// matchbox says nothing between "accepted" and "data channel open", so this is how the host
+/// learns that the opponent is in the room and the handshake with them is under way.
+const OCCUPANCY_POLL: f64 = 5.0;
 
 /// Socket channels: GGRS traffic, and the reliable side channel for the hello.
 const GAME_CHANNEL: usize = 0;
@@ -109,9 +120,10 @@ pub enum RoomFailure {
     Outdated,
     /// Nobody joined within [`LOBBY_TIMEOUT_MINUTES`].
     Timeout,
-    /// The opponent was found but the WebRTC connection to them failed (ICE state `failed`: no
-    /// candidate pair worked, typically a firewall, VPN or a network that blocks UDP). Web only:
-    /// the page reports the browser's ICE state, matchbox itself never gives up.
+    /// The opponent was found but the WebRTC connection to them failed: the browser reported ICE
+    /// state `failed` (no candidate pair worked), or nothing came up within [`PEER_CONNECT_TIMEOUT`]
+    /// of the opponent entering the room. Typically a VPN, a firewall or a network that blocks
+    /// UDP on one side; matchbox itself never gives up on a handshake.
     PeerUnreachable,
     /// Web only: the browser hides why a websocket was refused, so `/api/room/<code>` is being
     /// asked whether the room is full. Resolves to one of the above.
@@ -134,6 +146,14 @@ pub struct RoomConnection {
     accepted_at: Option<f64>,
     /// The occupancy lookup behind `RoomFailure::Checking`, with the time it was started.
     check: Option<(HttpSlot, f64)>,
+    /// Menu time the opponent was known to be in the room: acceptance for a matchmade room (the
+    /// server sends both players in together), the first occupancy poll reporting two peers for a
+    /// private one. Starts the [`PEER_CONNECT_TIMEOUT`] clock.
+    opponent_since: Option<f64>,
+    /// The occupancy poll of a private lobby that is in flight, with the time it was started.
+    occupancy: Option<(HttpSlot, f64)>,
+    /// Menu time of the next occupancy poll.
+    next_occupancy_poll: f64,
 }
 
 impl RoomConnection {
@@ -141,6 +161,11 @@ impl RoomConnection {
     /// "connected"...) once the handshake with them has started; `None` before that and on desktop.
     pub fn peer_status(&self) -> Option<String> {
         web_rtc::state()
+    }
+
+    /// The opponent is in the room and the peer connection to them is being set up.
+    pub fn opponent_found(&self) -> bool {
+        self.opponent_since.is_some()
     }
 }
 
@@ -642,7 +667,19 @@ fn start_room(commands: &mut Commands, cfg: &ClientConfig, code: String, kind: M
     let (socket, loop_result) = open_socket(&cfg.room_url(&code), cfg);
     commands.insert_resource(MatchSeed(seed_from_room(&code)));
     commands.insert_resource(kind);
-    commands.insert_resource(RoomConnection { code, socket: Some(socket), loop_result, connected: false, started: false, failure: None, accepted_at: None, check: None });
+    commands.insert_resource(RoomConnection {
+        code,
+        socket: Some(socket),
+        loop_result,
+        connected: false,
+        started: false,
+        failure: None,
+        accepted_at: None,
+        check: None,
+        opponent_since: None,
+        occupancy: None,
+        next_occupancy_poll: 0.0,
+    });
     next.set(AppState::Connecting);
 }
 
@@ -687,6 +724,31 @@ fn check_result(slot: &HttpSlot, started: f64, now: f64) -> Option<RoomFailure> 
             Some(RoomFailure::Unreachable)
         }
         None => None,
+    }
+}
+
+/// Private lobby: asks `/api/room/<code>` every [`OCCUPANCY_POLL`] whether the second slot is
+/// taken, and notes the time it first is. A failed lookup is not a lobby failure (the signaling
+/// socket decides that); it is simply tried again.
+fn poll_occupancy(room: &mut RoomConnection, cfg: &ClientConfig, now: f64) {
+    let in_flight = room.occupancy.as_ref().map(|(slot, started)| (slot.lock().unwrap().clone(), *started));
+    match in_flight {
+        Some((Some(Ok((200, body))), _)) => {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if v["peers"].as_u64().unwrap_or(0) >= 2 {
+                info!("the opponent is in room {}; waiting for the peer connection", room.code);
+                room.opponent_since = Some(now);
+            }
+            room.occupancy = None;
+        }
+        Some((Some(_), _)) => room.occupancy = None,
+        Some((None, started)) if now - started > PROBE_TIMEOUT => room.occupancy = None,
+        Some((None, _)) => {}
+        None if now >= room.next_occupancy_poll => {
+            room.occupancy = Some((http_get(&format!("{}/api/room/{}", cfg.api_url(), room.code)), now));
+            room.next_occupancy_poll = now + OCCUPANCY_POLL;
+        }
+        None => {}
     }
 }
 
@@ -761,6 +823,22 @@ fn poll_room(
         // The browser gave up on every candidate pair; matchbox would wait forever.
         if room.peer_status().as_deref() == Some("failed") {
             warn!("WebRTC connection to the opponent failed (ICE failed); leaving room {}", room.code);
+            room.socket = None;
+            room.failure = Some(RoomFailure::PeerUnreachable);
+            return;
+        }
+        // Neither desktop matchbox nor a browser whose opponent never sent a candidate reports
+        // anything between "accepted" and "data channel open": note when the opponent is in the
+        // room and give the handshake PEER_CONNECT_TIMEOUT from then.
+        if room.opponent_since.is_none() {
+            if matches!(kind.as_deref(), Some(MatchKind::Quick(_) | MatchKind::Ranked(_))) {
+                room.opponent_since = room.accepted_at;
+            } else {
+                poll_occupancy(room, &cfg, now);
+            }
+        }
+        if room.opponent_since.is_some_and(|t| now - t > PEER_CONNECT_TIMEOUT) {
+            warn!("the opponent is in room {} but no peer connection came up in {PEER_CONNECT_TIMEOUT}s; leaving it", room.code);
             room.socket = None;
             room.failure = Some(RoomFailure::PeerUnreachable);
             return;

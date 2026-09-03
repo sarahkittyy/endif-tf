@@ -14,9 +14,13 @@ const BUILT_IN_API: Option<&str> = option_env!("ENDIF_API");
 const BUILT_IN_ICE: Option<&str> = option_env!("ENDIF_ICE");
 /// ICE servers used when nothing else is configured: Google's public STUN plus the endif.tf TURN
 /// relay (coturn on sarahvps2 behind `endif.tf`, see the README), which gets two browsers on one LAN or
-/// peers behind strict NATs connected. The credential is public by nature (it ships in the web
-/// build); the relay is quota-limited and refuses to relay into private networks.
-pub const DEFAULT_ICE: &str = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,turn:endif.tf:3478|endif|2cedf86bb9ef5599bff1f43cd3c54b76";
+/// peers behind strict NATs connected. The relay is listed over UDP and over TCP: a browser whose
+/// WebRTC is set to "disable non-proxied UDP" (Opera GX with its VPN on, uBlock's "prevent WebRTC
+/// leaks", some corporate policies) or a network that drops UDP gathers no candidate at all with a
+/// UDP-only relay, and TURN over TCP is the only path such a browser still allows. The credential
+/// is public by nature (it ships in the web build); the relay is quota-limited and refuses to relay
+/// into private networks.
+pub const DEFAULT_ICE: &str = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,turn:endif.tf:3478|endif|2cedf86bb9ef5599bff1f43cd3c54b76,turn:endif.tf:3478?transport=tcp|endif|2cedf86bb9ef5599bff1f43cd3c54b76";
 
 /// Port the server binds by default; used when the web build derives the address from the page.
 #[cfg(target_arch = "wasm32")]

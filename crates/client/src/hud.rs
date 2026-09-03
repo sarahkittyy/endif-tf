@@ -413,7 +413,7 @@ fn kill_flashes(
 ) {
     let Ok((mut text, mut color, mut flash)) = q.single_mut() else { return };
     let now = time.elapsed_secs_f64();
-    for ev in &fx.events {
+    for ev in &fx.confirmed {
         if let SimEvent::RoundWon { winner, score } = ev {
             let won = *winner as usize == local.0;
             text.0 = if won {
@@ -435,7 +435,8 @@ fn kill_flashes(
 /// TF2-style death notices: `killer [soldier] victim  N U`, names in team colours (RED is the
 /// local player, BLU the opponent). A chain (the victim was killed again before landing from
 /// their respawn) puts a big yellow `x2`, `x3`, ... in front of the killer. Each line holds for
-/// two seconds, fades, then is removed.
+/// two seconds, fades, then is removed. Lines come from confirmed frames only (see `PendingFx`),
+/// so a kill is listed once, with the distance and chain both players' simulations agree on.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn kill_feed(
     mut commands: Commands,
@@ -463,7 +464,7 @@ fn kill_feed(
     });
 
     let fresh: Vec<(u8, u8, f32, u8)> = fx
-        .events
+        .confirmed
         .iter()
         .filter_map(|ev| match ev {
             SimEvent::PlayerHit { attacker, victim, airshot_kill: true, distance, chain, .. } if attacker != victim => {
