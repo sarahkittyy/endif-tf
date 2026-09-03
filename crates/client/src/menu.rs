@@ -3743,8 +3743,10 @@ fn setup_connecting(
                             no_wrap(),
                         ));
                     });
+                    // `join_link` is a link on the web and the bare code on desktop.
+                    let what = if cfg!(target_arch = "wasm32") { "link" } else { "code" };
                     c.spawn(theme.label(
-                        "share this link to invite someone:",
+                        format!("share this {what} to invite someone:"),
                         14.0,
                         theme::OFF_WHITE,
                     ));
