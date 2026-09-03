@@ -489,7 +489,7 @@ fn muzzle_offset(weapon_bits: u32) -> (Vec3, Weapon) {
 fn the_original_fires_from_the_middle() {
     // `FireRocket`: 23.5 forward, 12 to the right and 3 below the eye; The Original's
     // `centerfire_projectile` drops the sideways part.
-    let (stock, weapon) = muzzle_offset(0);
+    let (stock, weapon) = muzzle_offset(IN_WEAPON_STOCK);
     assert_eq!(weapon, Weapon::Stock);
     assert!((stock - Vec3::new(23.5, -12.0, -3.0)).length() < 0.01, "stock muzzle {stock:?}");
     let (original, weapon) = muzzle_offset(IN_WEAPON_ORIGINAL);
@@ -500,6 +500,9 @@ fn the_original_fires_from_the_middle() {
 #[test]
 fn launcher_choice_waits_for_the_next_spawn() {
     let (arena, mut sim) = fresh();
+    // `fresh` stepped a blank input, so the spawns are still waiting for a preference; state one.
+    sim.step(&arena, [with(IN_WEAPON_STOCK, 0.0, 0.0), with(IN_WEAPON_STOCK, 0.0, 0.0)]);
+    assert!(!sim.players[0].weapon_pending);
     assert_eq!(sim.players[0].weapon, Weapon::Stock);
     // Asking for The Original mid-life changes nothing...
     for _ in 0..10 {
@@ -514,15 +517,28 @@ fn launcher_choice_waits_for_the_next_spawn() {
     assert_eq!(sim.players[0].weapon, Weapon::Original);
     // And going back to stock waits the same way.
     for _ in 0..10 {
-        sim.step(&arena, [idle(0.0), idle(0.0)]);
+        sim.step(&arena, [with(IN_WEAPON_STOCK, 0.0, 0.0), idle(0.0)]);
     }
     assert_eq!(sim.players[0].weapon, Weapon::Original);
     // Both players were spawned by `begin` before any input existed: the first stepped tick
-    // decides for them too.
+    // that states a preference decides for them too. Blank inputs (GGRS pads the first
+    // `input_delay` frames with them) decide nothing, so the spawn keeps waiting instead of
+    // defaulting to stock and only switching at the first death.
     let mut sim = SimState::new(7, Rules::default());
     sim.begin(&arena);
     assert!(sim.players[1].alive && sim.players[1].weapon_pending);
+    for _ in 0..3 {
+        sim.step(&arena, [idle(0.0), idle(0.0)]);
+    }
+    assert!(sim.players[0].weapon_pending && sim.players[1].weapon_pending);
     sim.step(&arena, [idle(0.0), with(IN_WEAPON_ORIGINAL, 0.0, 0.0)]);
+    assert!(sim.players[0].weapon_pending && !sim.players[1].weapon_pending);
+    assert_eq!((sim.players[0].weapon, sim.players[1].weapon), (Weapon::Stock, Weapon::Original));
+    sim.step(&arena, [with(IN_WEAPON_STOCK, 0.0, 0.0), idle(0.0)]);
+    assert!(!sim.players[0].weapon_pending);
+    assert_eq!(sim.players[0].weapon, Weapon::Stock);
+    // A stated preference is remembered past later blank inputs (a peer that stops sending).
+    sim.step(&arena, [idle(0.0), idle(0.0)]);
     assert_eq!((sim.players[0].weapon, sim.players[1].weapon), (Weapon::Stock, Weapon::Original));
 }
 
@@ -534,6 +550,9 @@ fn practice_switches_launchers_at_once() {
     assert_eq!(sim.players[0].weapon, Weapon::Stock);
     sim.step(&arena, [with(IN_WEAPON_ORIGINAL, 0.0, 0.0), idle(0.0)]);
     assert_eq!(sim.players[0].weapon, Weapon::Original);
+    // A blank input states nothing, even in practice.
     sim.step(&arena, [idle(0.0), idle(0.0)]);
+    assert_eq!(sim.players[0].weapon, Weapon::Original);
+    sim.step(&arena, [with(IN_WEAPON_STOCK, 0.0, 0.0), idle(0.0)]);
     assert_eq!(sim.players[0].weapon, Weapon::Stock);
 }

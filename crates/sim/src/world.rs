@@ -214,7 +214,8 @@ impl SimState {
 
     /// The first spawns, without advancing time. The client calls this before the first frame so
     /// there is something to draw; `step` does it on its own otherwise. Players spawned here have
-    /// no input yet, so their launcher is picked on the first stepped tick (`Player::weapon_pending`).
+    /// no input yet, so their launcher is picked on the first stepped tick that carries a
+    /// preference (`Player::weapon_pending`).
     pub fn begin(&mut self, arena: &Arena) {
         if self.phase == Phase::Warmup {
             self.phase = Phase::Fighting;
@@ -242,11 +243,15 @@ impl SimState {
 
         // A fresh spawn takes the launcher its input asks for (the loadout is read at spawn, as in
         // TF2 a change made mid-life waits for the next one). Every spawn, `begin`'s included,
-        // is resolved here on the first tick it sees an input. Practice applies it every tick.
+        // is resolved here on the first tick whose input states a preference: the blank inputs
+        // GGRS pads the first `input_delay` frames with say nothing, so the spawn keeps waiting
+        // rather than defaulting to stock. Practice applies it every tick.
         let instant = self.rules.instant_weapon_switch;
         for (p, input) in self.players.iter_mut().zip(&inputs) {
-            if p.weapon_pending || instant {
-                p.weapon = Weapon::from_buttons(input.buttons);
+            if (p.weapon_pending || instant)
+                && let Some(weapon) = Weapon::from_buttons(input.buttons)
+            {
+                p.weapon = weapon;
                 p.weapon_pending = false;
             }
         }

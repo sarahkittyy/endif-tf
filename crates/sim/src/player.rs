@@ -24,9 +24,17 @@ pub enum Weapon {
 }
 
 impl Weapon {
-    /// The launcher a player's input asks for (`IN_WEAPON_ORIGINAL`).
-    pub fn from_buttons(buttons: u32) -> Weapon {
-        if buttons & crate::input::IN_WEAPON_ORIGINAL != 0 { Weapon::Original } else { Weapon::Stock }
+    /// The launcher a player's input asks for (`IN_WEAPON_ORIGINAL` / `IN_WEAPON_STOCK`), or
+    /// `None` for a blank input that states no preference.
+    pub fn from_buttons(buttons: u32) -> Option<Weapon> {
+        use crate::input::{IN_WEAPON_ORIGINAL, IN_WEAPON_STOCK};
+        if buttons & IN_WEAPON_ORIGINAL != 0 {
+            Some(Weapon::Original)
+        } else if buttons & IN_WEAPON_STOCK != 0 {
+            Some(Weapon::Stock)
+        } else {
+            None
+        }
     }
 }
 
@@ -86,8 +94,9 @@ pub struct Player {
     /// the whole life, like a loadout change in TF2 that only takes effect at the next spawn
     /// (every tick under `Rules::instant_weapon_switch`).
     pub weapon: Weapon,
-    /// A fresh spawn that has not read its input yet (`SimState::begin` spawns before the first
-    /// input exists); `SimState::step` resolves it from that tick's input.
+    /// A fresh spawn that has not read a launcher preference yet (`SimState::begin` spawns before
+    /// the first input exists, and the first inputs GGRS delivers are blank padding);
+    /// `SimState::step` resolves it from the first input that states one.
     pub weapon_pending: bool,
     pub next_primary_attack: f32,
     pub clip: i32,

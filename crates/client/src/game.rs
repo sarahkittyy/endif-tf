@@ -14,7 +14,7 @@ use endif_sim::math::{normalize_yaw, QAngle};
 use crate::menu::UiScreen;
 use crate::settings::{Action, Settings};
 use endif_sim::{
-    Arena, IN_ATTACK, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, IN_WEAPON_ORIGINAL, MAX_PITCH, NUM_PLAYERS,
+    Arena, IN_ATTACK, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, IN_WEAPON_ORIGINAL, IN_WEAPON_STOCK, MAX_PITCH, NUM_PLAYERS,
     PlayerInput, Rules, SimEvent, SimState, Weapon,
 };
 
@@ -407,10 +407,12 @@ fn read_local_inputs(
                 }
             }
             // The launcher preference is not a key: it travels with every input, menu open or
-            // not, and the simulation applies it at the next spawn.
-            if settings.weapon == Weapon::Original {
-                buttons |= IN_WEAPON_ORIGINAL;
-            }
+            // not, and the simulation applies it at the next spawn. Always one of the two bits, so
+            // the zeroed inputs GGRS pads the first frames with are told apart from "stock".
+            buttons |= match settings.weapon {
+                Weapon::Original => IN_WEAPON_ORIGINAL,
+                Weapon::Stock => IN_WEAPON_STOCK,
+            };
             PlayerInput { buttons, pitch: look.pitch, yaw: look.yaw }
         } else {
             // Second local player in practice mode: stands still.
