@@ -1,6 +1,6 @@
 //! The complete rollback-able game state and the fixed-tick stepper.
 
-use crate::arena::Arena;
+use crate::arena::{Arena, Spawn};
 use crate::consts::*;
 use crate::input::*;
 use crate::math::*;
@@ -117,48 +117,85 @@ impl SimState {
         if self.players[o].alive { vec![(o as u8, self.players[o].world_aabb())] } else { Vec::new() }
     }
 
-    /// Picks a spawn point at random, preferring ones at least `MGE_MIN_SPAWN_DIST` from the opponent.
-    fn choose_spawn(&mut self, arena: &Arena, idx: usize) -> usize {
+    /// Picks a spawn point at random. A spawn where the player would appear touching the
+    /// opponent's hull is never used, so the two can not spawn inside each other; among the rest,
+    /// spawns at least `MGE_MIN_SPAWN_DIST` (`mindist`) from the opponent are preferred, measured
+    /// both where the player appears (`height` above the spawn point for a high respawn) and, for
+    /// a flung respawn, where the fall lands (`fling` is the horizontal reach and the yaw offset
+    /// from the spawn's facing). Only the final choice draws from the RNG, once.
+    fn choose_spawn(&mut self, arena: &Arena, idx: usize, height: f32, fling: Option<(f32, f32)>) -> usize {
         let n = arena.spawns.len();
         let o = Self::other(idx);
-        let opponent = if self.players[o].alive { Some(self.players[o].origin) } else { None };
-        let mut choice = self.rng.random_int(0, n as i32 - 1) as usize;
-        for _ in 0..8 {
-            match opponent {
-                Some(op) if arena.spawns[choice].origin.dist_to(op) < MGE_MIN_SPAWN_DIST => {
-                    choice = self.rng.random_int(0, n as i32 - 1) as usize;
-                }
-                _ => break,
-            }
+        if !self.players[o].alive {
+            return self.rng.random_int(0, n as i32 - 1) as usize;
         }
-        choice
+        let opponent = self.players[o].origin;
+        let blocker = self.players[o].world_aabb();
+        let appears = |s: &Spawn| s.origin.with_z(s.origin.z + height);
+        let lands = |s: &Spawn| match fling {
+            Some((reach, yaw_offset)) => {
+                let yaw = deg2rad(s.angles.yaw + yaw_offset);
+                s.origin + Vec3::new(cosf(yaw) * reach, sinf(yaw) * reach, 0.0)
+            }
+            None => s.origin,
+        };
+        let clear: Vec<usize> = (0..n)
+            .filter(|&i| {
+                let p = appears(&arena.spawns[i]);
+                !Aabb::new(p + VEC_HULL_MIN, p + VEC_HULL_MAX).touches(&blocker)
+            })
+            .collect();
+        let far: Vec<usize> = clear
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let s = &arena.spawns[i];
+                appears(s).dist_to(opponent) >= MGE_MIN_SPAWN_DIST && lands(s).dist_to(opponent) >= MGE_MIN_SPAWN_DIST
+            })
+            .collect();
+        let set = if !far.is_empty() {
+            far
+        } else if !clear.is_empty() {
+            clear
+        } else {
+            // Every spawn is inside the opponent (impossible with spawns further apart than a hull,
+            // but never stack the players): the farthest one.
+            let dist = |i: &usize| appears(&arena.spawns[*i]).dist_to(opponent);
+            return (0..n).max_by(|a, b| dist(a).total_cmp(&dist(b))).unwrap_or(0);
+        };
+        set[self.rng.random_int(0, set.len() as i32 - 1) as usize]
     }
 
     fn respawn(&mut self, arena: &Arena, idx: usize) {
-        let s = self.choose_spawn(arena, idx);
+        // `Player::spawn` resets the player, so read the death flag first.
+        let high = std::mem::take(&mut self.players[idx].respawn_high);
+        // House rule: after a death you come back high above the spawn, airborne, with a
+        // sideways fling so the fall is not a predictable vertical line. The fling is a
+        // horizontal velocity sized so that an untouched fall lands `tan(angle) * height`
+        // from the spawn point, in a random direction within `RESPAWN_FLING_YAW_SPREAD` of
+        // the spawn's facing (towards the arena centre) so it never lands in a wall.
+        // Both draws come from the rolled-back simulation RNG, so peers agree. They are drawn
+        // before the spawn is picked so the pick can see where the fall would land.
+        let height = if high { self.rules.respawn_height as f32 } else { 0.0 };
+        let fling = high.then(|| {
+            let (lo, hi) = self.rules.respawn_fling_deg;
+            let angle = deg2rad(self.rng.random_int(lo as i32, hi as i32) as f32);
+            let yaw_offset = self.rng.random_float(-RESPAWN_FLING_YAW_SPREAD, RESPAWN_FLING_YAW_SPREAD);
+            let fall_time = sqrtf(2.0 * height / SV_GRAVITY);
+            let speed = sinf(angle) / cosf(angle) * height / fall_time;
+            (speed, speed * fall_time, yaw_offset)
+        });
+        let s = self.choose_spawn(arena, idx, height, fling.map(|(_, reach, yaw_offset)| (reach, yaw_offset)));
         let spawn = arena.spawns[s];
         let tick = self.tick;
         let curtime = self.curtime();
-        // `Player::spawn` resets the player, so read the death flag first.
-        let high = std::mem::take(&mut self.players[idx].respawn_high);
         self.players[idx].spawn(spawn.origin, spawn.angles, tick, curtime);
         // UTIL_DropToFloor: spawn points sit on the floor plane, but a hull touching a surface
         // counts as inside it, so trace down from slightly above and rest DIST_EPSILON over it.
         let mut origin = drop_to_floor(&arena.brushes, &self.players[idx]);
-        if high {
-            // House rule: after a death you come back high above the spawn, airborne, with a
-            // sideways fling so the fall is not a predictable vertical line. The fling is a
-            // horizontal velocity sized so that an untouched fall lands `tan(angle) * height`
-            // from the spawn point, in a random direction within `RESPAWN_FLING_YAW_SPREAD` of
-            // the spawn's facing (towards the arena centre) so it never lands in a wall.
-            // Both draws come from the rolled-back simulation RNG, so peers agree.
-            let height = self.rules.respawn_height as f32;
+        if let Some((speed, _, yaw_offset)) = fling {
             origin.z += height;
-            let (lo, hi) = self.rules.respawn_fling_deg;
-            let angle = deg2rad(self.rng.random_int(lo as i32, hi as i32) as f32);
-            let yaw = deg2rad(spawn.angles.yaw + self.rng.random_float(-RESPAWN_FLING_YAW_SPREAD, RESPAWN_FLING_YAW_SPREAD));
-            let fall_time = sqrtf(2.0 * height / SV_GRAVITY);
-            let speed = sinf(angle) / cosf(angle) * height / fall_time;
+            let yaw = deg2rad(spawn.angles.yaw + yaw_offset);
             self.players[idx].velocity = Vec3::new(cosf(yaw) * speed, sinf(yaw) * speed, 0.0);
         }
         self.players[idx].origin = origin;

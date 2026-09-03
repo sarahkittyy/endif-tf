@@ -45,6 +45,56 @@ fn spawns_land_on_floor() {
     }
 }
 
+/// Whether the two players' hulls overlap or touch.
+fn players_touch(sim: &SimState) -> bool {
+    sim.players[0].world_aabb().touches(&sim.players[1].world_aabb())
+}
+
+#[test]
+fn spawns_never_overlap_the_opponent() {
+    // The opponent camps a spawn point; a respawn must never appear inside them, whether on the
+    // floor (a round reset) or high above (after a death), over many seeds.
+    for seed in 0..64u64 {
+        let arena = Arena::classic_square();
+        let mut sim = SimState::new(seed, Rules::default());
+        sim.step(&arena, [PlayerInput::default(); 2]);
+        assert!(!players_touch(&sim), "seed {seed}: first spawns overlap");
+        for (round, camp) in arena.spawns.iter().enumerate() {
+            for high in [false, true] {
+                place(&mut sim, 1, camp.origin, 0.0);
+                settle(&mut sim, &arena, 2);
+                sim.players[0].alive = false;
+                sim.players[0].respawn_tick = sim.tick;
+                sim.players[0].respawn_high = high;
+                sim.step(&arena, [idle(0.0), idle(0.0)]);
+                assert!(sim.players[0].alive);
+                let d = sim.players[0].origin.dist_to(sim.players[1].origin);
+                assert!(!players_touch(&sim), "seed {seed} spawn {round} high {high}: spawned inside the opponent");
+                assert!(d >= MGE_MIN_SPAWN_DIST, "seed {seed} spawn {round} high {high}: spawned {d} from the opponent");
+            }
+        }
+    }
+}
+
+#[test]
+fn round_reset_spawns_apart() {
+    // Both players come back on the same tick after a round; they must not share a spawn.
+    for seed in 0..64u64 {
+        let arena = Arena::classic_square();
+        let mut sim = SimState::new(seed, Rules::default());
+        sim.step(&arena, [PlayerInput::default(); 2]);
+        for p in &mut sim.players {
+            p.alive = false;
+            p.respawn_tick = sim.tick;
+            p.respawn_high = false;
+        }
+        sim.step(&arena, [idle(0.0), idle(0.0)]);
+        assert!(sim.players[0].alive && sim.players[1].alive);
+        let d = sim.players[0].origin.dist_to(sim.players[1].origin);
+        assert!(!players_touch(&sim) && d >= MGE_MIN_SPAWN_DIST, "seed {seed}: reset spawns {d} apart");
+    }
+}
+
 #[test]
 fn spawns_look_at_the_arena_centre() {
     let (arena, sim) = fresh();

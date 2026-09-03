@@ -40,6 +40,13 @@ impl Aabb {
     pub fn size(&self) -> Vec3 {
         self.maxs - self.mins
     }
+
+    /// Whether the boxes overlap or touch (a hull resting against another counts as in it).
+    pub fn touches(&self, o: &Aabb) -> bool {
+        self.mins.x <= o.maxs.x && self.maxs.x >= o.mins.x
+            && self.mins.y <= o.maxs.y && self.maxs.y >= o.mins.y
+            && self.mins.z <= o.maxs.z && self.maxs.z >= o.mins.z
+    }
 }
 
 #[inline]
