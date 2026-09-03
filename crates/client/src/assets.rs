@@ -48,6 +48,9 @@ pub struct GameAssets {
     pub wall: Handle<Image>,
     pub floor: Handle<Image>,
     pub scorch: Handle<Image>,
+    /// The sky, a cubemap strip built by `tools/tf2/skybox.py` (six faces stacked, wgpu order);
+    /// `render::prepare_skybox` turns it into a cube texture once it has loaded.
+    pub skybox: Handle<Image>,
     pub sprites: [Handle<Image>; SPRITE_COUNT],
 }
 
@@ -103,7 +106,7 @@ impl Plugin for GameAssetsPlugin {
     }
 }
 
-fn repeat_sampler(settings: &mut ImageLoaderSettings) {
+pub(crate) fn repeat_sampler(settings: &mut ImageLoaderSettings) {
     settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
@@ -128,6 +131,7 @@ impl FromWorld for GameAssets {
             wall: server.load_builder().with_settings(repeat_sampler).load("textures/wall.png"),
             floor: server.load_builder().with_settings(repeat_sampler).load("textures/floor.png"),
             scorch: server.load("textures/scorch.png"),
+            skybox: server.load("textures/skybox.png"),
             sprites,
         }
     }

@@ -77,8 +77,10 @@ fn collect(mut commands: Commands, assets: Res<GameAssets>, theme: Res<Theme>, s
         assets.wall.clone().untyped(),
         assets.floor.clone().untyped(),
         assets.scorch.clone().untyped(),
+        assets.skybox.clone().untyped(),
         theme.build.clone().untyped(),
         theme.secondary.clone().untyped(),
+        theme.symbols.clone().untyped(),
         theme.soldier.clone().untyped(),
         theme.menu_bg.clone().untyped(),
     ];

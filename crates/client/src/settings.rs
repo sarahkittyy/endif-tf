@@ -3,7 +3,8 @@
 //! writable) and to `localStorage` on the web.
 
 use bevy::prelude::*;
-use endif_sim::Weapon;
+use endif_sim::fruit::{SOLDIERS_MAX, SOLDIERS_MIN, SPEED_MAX, SPEED_MIN, WALL_DISTANCE_MAX, WALL_DISTANCE_MIN};
+use endif_sim::{Difficulty, FruitSettings, Weapon};
 use serde::{Deserialize, Serialize};
 
 /// TF2 `m_yaw` / `m_pitch`: degrees per mouse count at sensitivity 1.
@@ -61,6 +62,12 @@ impl Action {
             Action::Fire => "fire",
         }
     }
+}
+
+/// True while either Alt key is held. Enter handlers check it so that Alt+Enter (the desktop
+/// fullscreen toggle, see `fullscreen`) does not also submit whatever form has the keyboard.
+pub fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight])
 }
 
 /// A physical key or a mouse button.
@@ -227,6 +234,12 @@ pub enum Slider {
     Volume,
     /// Frames of input delay (manual mode), whole numbers.
     InputDelay,
+    /// Fruit Ninja endless play: soldiers in the air at once, whole numbers.
+    Soldiers,
+    /// Fruit Ninja endless play: the soldiers' sideways speed, units per second.
+    Speed,
+    /// Fruit Ninja endless play: units from the player to the wooden wall.
+    WallDistance,
 }
 
 impl Slider {
@@ -235,6 +248,9 @@ impl Slider {
             Slider::Sens(_) => (SENS_MIN, SENS_MAX),
             Slider::Volume => (0.0, 1.0),
             Slider::InputDelay => (0.0, INPUT_DELAY_MAX as f32),
+            Slider::Soldiers => (SOLDIERS_MIN as f32, SOLDIERS_MAX as f32),
+            Slider::Speed => (SPEED_MIN, SPEED_MAX),
+            Slider::WallDistance => (WALL_DISTANCE_MIN, WALL_DISTANCE_MAX),
         }
     }
 
@@ -243,6 +259,9 @@ impl Slider {
             Slider::Sens(axis) => s.sensitivity(axis),
             Slider::Volume => s.volume,
             Slider::InputDelay => s.input_delay as f32,
+            Slider::Soldiers => s.fruit_soldiers as f32,
+            Slider::Speed => s.fruit_speed,
+            Slider::WallDistance => s.fruit_distance,
         }
     }
 
@@ -251,6 +270,9 @@ impl Slider {
             Slider::Sens(axis) => s.set_sensitivity(axis, v),
             Slider::Volume => s.set_volume(v),
             Slider::InputDelay => s.set_input_delay(v),
+            Slider::Soldiers => s.fruit_soldiers = v.round().clamp(SOLDIERS_MIN as f32, SOLDIERS_MAX as f32) as u8,
+            Slider::Speed => s.fruit_speed = (v.clamp(SPEED_MIN, SPEED_MAX) / 10.0).round() * 10.0,
+            Slider::WallDistance => s.fruit_distance = (v.clamp(WALL_DISTANCE_MIN, WALL_DISTANCE_MAX) / 10.0).round() * 10.0,
         }
     }
 
@@ -266,6 +288,9 @@ impl Slider {
             Slider::Sens(_) => format!("{:.2}", self.value(s)),
             Slider::Volume => format!("{:.0}%", self.value(s) * 100.0),
             Slider::InputDelay => format!("{} ({} ms)", s.input_delay, frames_to_ms(s.input_delay)),
+            Slider::Soldiers => s.fruit_soldiers.to_string(),
+            Slider::Speed => format!("{:.0} u/s", s.fruit_speed),
+            Slider::WallDistance => format!("{:.0} u", s.fruit_distance),
         }
     }
 
@@ -275,19 +300,23 @@ impl Slider {
             Slider::Sens(_) => format!("{:.2}", self.value(s)),
             Slider::Volume => format!("{:.0}", self.value(s) * 100.0),
             Slider::InputDelay => s.input_delay.to_string(),
+            Slider::Soldiers => s.fruit_soldiers.to_string(),
+            Slider::Speed => format!("{:.0}", s.fruit_speed),
+            Slider::WallDistance => format!("{:.0}", s.fruit_distance),
         }
     }
 
     /// Parses typed text back into a value (volume is typed as a percentage).
     pub fn parse(self, text: &str) -> Option<f32> {
-        let v: f32 = text.trim().trim_end_matches('%').trim().parse().ok()?;
+        let text = text.trim().trim_end_matches('%').trim_end_matches("u/s").trim_end_matches(['u', 'U']);
+        let v: f32 = text.trim().parse().ok()?;
         if !v.is_finite() {
             return None;
         }
         Some(match self {
             Slider::Sens(_) => v,
             Slider::Volume => v / 100.0,
-            Slider::InputDelay => v,
+            Slider::InputDelay | Slider::Soldiers | Slider::Speed | Slider::WallDistance => v,
         })
     }
 }
@@ -308,8 +337,9 @@ pub struct Settings {
     pub invert_y: bool,
     /// Master volume, 0..1.
     pub volume: f32,
-    /// Web only: take the page fullscreen on the click that starts play. Off by default; in
-    /// Chromium it arms the keyboard lock, which lets Ctrl be bound without Ctrl+W closing the tab.
+    /// Web: take the page fullscreen on the click that starts play. Off by default; in Chromium it
+    /// arms the keyboard lock, which lets Ctrl be bound without Ctrl+W closing the tab.
+    /// Desktop: start in borderless fullscreen; F11 / Alt+Enter toggle it and update this.
     pub fullscreen: bool,
     /// Let the game pick the input delay from the connection (see `netstats::tune_input_delay`).
     /// Off: `input_delay` is used as is.
@@ -321,6 +351,13 @@ pub struct Settings {
     /// Preferred rocket launcher (stock or The Original). Sent with every input; the simulation
     /// reads it when the player spawns, so a change made mid-life applies at the next spawn.
     pub weapon: Weapon,
+    /// Fruit Ninja options (see `endif_sim::fruit`): rounds of twenty soldiers on a difficulty
+    /// preset, or endless play with its own soldiers at a time, sideways speed and wall distance.
+    pub fruit_difficulty: Difficulty,
+    pub fruit_rounds: bool,
+    pub fruit_soldiers: u8,
+    pub fruit_speed: f32,
+    pub fruit_distance: f32,
     pub bindings: Bindings,
 }
 
@@ -336,6 +373,11 @@ impl Default for Settings {
             adaptive_delay: true,
             input_delay: INPUT_DELAY_DEFAULT,
             weapon: Weapon::Stock,
+            fruit_difficulty: FruitSettings::default().difficulty,
+            fruit_rounds: false,
+            fruit_soldiers: FruitSettings::default().soldiers,
+            fruit_speed: FruitSettings::default().speed,
+            fruit_distance: FruitSettings::default().wall_distance,
             bindings: Bindings::default(),
         }
     }
@@ -382,6 +424,18 @@ impl Settings {
         self.input_delay = value.round().clamp(0.0, INPUT_DELAY_MAX as f32) as u8;
     }
 
+    /// The Fruit Ninja options as the simulation wants them (`reset` while the countdown runs).
+    pub fn fruit_settings(&self, reset: bool) -> FruitSettings {
+        FruitSettings {
+            difficulty: self.fruit_difficulty,
+            rounds: self.fruit_rounds,
+            soldiers: self.fruit_soldiers,
+            speed: self.fruit_speed,
+            wall_distance: self.fruit_distance,
+            reset,
+        }
+    }
+
     /// Unlocks or relocks the axes; relocking copies X into Y.
     pub fn set_separate_sensitivity(&mut self, separate: bool) {
         self.separate_sensitivity = separate;
@@ -422,7 +476,12 @@ impl Settings {
         out.push_str(&format!("volume = {:.2}\n\n[video]\n", self.volume));
         out.push_str(&format!("fullscreen = {}\n\n[network]\n", self.fullscreen));
         out.push_str(&format!("adaptive_delay = {}\n", self.adaptive_delay));
-        out.push_str(&format!("input_delay = {}\n\n[keys]\n", self.input_delay));
+        out.push_str(&format!("input_delay = {}\n\n[fruit ninja]\n", self.input_delay));
+        out.push_str(&format!("difficulty = {}\n", self.fruit_difficulty.ini_name()));
+        out.push_str(&format!("mode = {}\n", if self.fruit_rounds { "rounds" } else { "endless" }));
+        out.push_str(&format!("soldiers = {}\n", self.fruit_soldiers));
+        out.push_str(&format!("speed = {:.0}\n", self.fruit_speed));
+        out.push_str(&format!("wall_distance = {:.0}\n\n[keys]\n", self.fruit_distance));
         for a in Action::ALL {
             out.push_str(&format!(
                 "{} = {}\n",
@@ -478,6 +537,27 @@ impl Settings {
                 "volume" => {
                     if let Ok(x) = v.parse() {
                         s.set_volume(x);
+                    }
+                }
+                "mode" => s.fruit_rounds = v.eq_ignore_ascii_case("rounds"),
+                "soldiers" => {
+                    if let Ok(x) = v.parse() {
+                        Slider::Soldiers.set(&mut s, x);
+                    }
+                }
+                "speed" => {
+                    if let Ok(x) = v.parse() {
+                        Slider::Speed.set(&mut s, x);
+                    }
+                }
+                "wall_distance" => {
+                    if let Ok(x) = v.parse() {
+                        Slider::WallDistance.set(&mut s, x);
+                    }
+                }
+                "difficulty" => {
+                    if let Some(d) = Difficulty::from_ini(v) {
+                        s.fruit_difficulty = d;
                     }
                 }
                 _ => {

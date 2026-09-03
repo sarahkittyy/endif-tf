@@ -23,7 +23,8 @@ use bevy::gltf::{Gltf, GltfMaterialName};
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::WorldInstanceReady;
-use endif_sim::{NUM_PLAYERS, SOLDIER_MAX_SPEED, SimEvent};
+use endif_sim::Vec3 as SVec3;
+use endif_sim::{NUM_PLAYERS, SOLDIER_MAX_SPEED, SimEvent, Weapon};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -67,6 +68,34 @@ impl Default for AimData {
 #[derive(Component)]
 pub struct PlayerModel(pub u8);
 
+/// A Fruit Ninja soldier's model, by pool slot (see `fruit.rs`).
+#[derive(Component)]
+pub struct TargetModel(pub u8);
+
+/// Whose state a soldier model shows: a player, or a gallery soldier by pool slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Subject {
+    Player(u8),
+    Target(u8),
+}
+
+/// What the gallery's soldiers are doing, by pool slot (`None` for an empty slot). Written by
+/// `fruit::sync_targets`, read by `drive_soldier_anims`.
+#[derive(Resource, Default)]
+pub struct TargetPoses(pub Vec<Option<TargetPose>>);
+
+#[derive(Clone, Copy, Debug)]
+pub struct TargetPose {
+    pub velocity: SVec3,
+    /// Source yaw the model faces, degrees.
+    pub yaw: f32,
+    /// The launcher it carries.
+    pub weapon: Weapon,
+    /// Seconds since the soldier was hit, once it is a ragdoll: the animation freezes and the
+    /// limbs flail (`apply_soldier_pose`).
+    pub ragdoll: Option<f32>,
+}
+
 #[derive(Clone)]
 struct SoldierNodes {
     stand: AnimationNodeIndex,
@@ -86,7 +115,7 @@ struct SoldierGraph(Option<(Handle<AnimationGraph>, SoldierNodes)>);
 
 #[derive(Component)]
 struct SoldierAnim {
-    player: u8,
+    subject: Subject,
     nodes: SoldierNodes,
     /// Smoothed locomotion weights: [stand, crouch, float, run×9, walk×9].
     weights: [f32; 21],
@@ -140,7 +169,15 @@ struct IkChain {
 struct SoldierPose {
     sets: Vec<AimSet>,
     ik: Option<IkChain>,
+    /// The bones that flail when the soldier is a ragdoll, and their rotations as the
+    /// animation left them when it froze (`limb_base` is filled on the first ragdoll frame).
+    limbs: Vec<Entity>,
+    limb_base: Vec<Quat>,
 }
+
+/// Bones swung about when a gallery soldier is a ragdoll.
+const RAGDOLL_LIMBS: [&str; 10] =
+    ["bip_head", "bip_upperArm_L", "bip_lowerArm_L", "bip_upperArm_R", "bip_lowerArm_R", "bip_hip_L", "bip_knee_L", "bip_hip_R", "bip_knee_R", "bip_spine_1"];
 
 /// The mesh nodes of the two launchers in `soldier.glb`, in `Weapon` order: `w_rocketlauncher`
 /// and `c_bet_rocketlauncher` (The Original is a c_model, so it is its own world model).
@@ -157,6 +194,7 @@ impl Plugin for PlayerModelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SoldierGraph>()
             .init_resource::<AimData>()
+            .init_resource::<TargetPoses>()
             .add_systems(OnEnter(AppState::InGame), spawn_player_models)
             .add_systems(Update, (drive_soldier_anims, sync_launcher_models).run_if(in_state(AppState::InGame)))
             .add_systems(
@@ -179,6 +217,15 @@ fn spawn_player_models(mut commands: Commands, assets: Res<GameAssets>) {
             ))
             .observe(on_soldier_ready);
     }
+}
+
+/// A soldier model for the gallery's pool slot `slot`, `offset` from its parent (the parent sits
+/// at the hull's centre so the model can tumble about it). The caller parents it.
+pub fn target_model(commands: &mut Commands, assets: &GameAssets, slot: u8, offset: Vec3) -> Entity {
+    commands
+        .spawn((GameEntity, TargetModel(slot), WorldAssetRoot(assets.soldier_scene()), Transform::from_translation(offset), Visibility::Inherited))
+        .observe(on_soldier_ready)
+        .id()
 }
 
 fn build_graph(gltf: &Gltf, clips: &Assets<AnimationClip>, graphs: &mut Assets<AnimationGraph>) -> Option<(Handle<AnimationGraph>, SoldierNodes)> {
@@ -260,11 +307,13 @@ fn resolve_pose(aim: &AimFile, by_name: &HashMap<String, Entity>, fallback_root:
     if ik.is_none() {
         warn!("soldier.glb: IK chain bones {:?} / {} not found, hand will not follow the launcher", aim.ik_chain, aim.ik_target);
     }
-    SoldierPose { sets, ik }
+    let limbs = RAGDOLL_LIMBS.iter().filter_map(|n| bone(n)).collect();
+    SoldierPose { sets, ik, limbs, limb_base: Vec::new() }
 }
 
 /// Wires the freshly spawned model: animation graph and the aim/IK bone tables on the node the
-/// glTF loader gave an `AnimationPlayer`, and the blue team's textures for player 1.
+/// glTF loader gave an `AnimationPlayer`, and the blue team's textures for everyone but player 0
+/// (the opponent, and the gallery's soldiers).
 #[allow(clippy::too_many_arguments)]
 fn on_soldier_ready(
     trigger: On<WorldInstanceReady>,
@@ -276,14 +325,18 @@ fn on_soldier_ready(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut cache: ResMut<SoldierGraph>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    models: Query<&PlayerModel>,
+    models: Query<(Option<&PlayerModel>, Option<&TargetModel>)>,
     children: Query<&Children>,
     names: Query<&Name>,
     players: Query<(), With<AnimationPlayer>>,
     mats: Query<(&GltfMaterialName, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     let root = trigger.event().entity;
-    let Ok(model) = models.get(root) else { return };
+    let subject = match models.get(root) {
+        Ok((Some(p), _)) => Subject::Player(p.0),
+        Ok((_, Some(t))) => Subject::Target(t.0),
+        _ => return,
+    };
     if cache.0.is_none() {
         if let Some(gltf) = gltfs.get(&assets.soldier) {
             cache.0 = build_graph(gltf, &clips, &mut graphs);
@@ -292,7 +345,7 @@ fn on_soldier_ready(
             warn!("soldier.glb: animation clips missing, model will not animate");
         }
     }
-    let blue = model.0 == 1;
+    let blue = subject != Subject::Player(0);
     let mut by_name: HashMap<String, Entity> = HashMap::new();
     for e in children.iter_descendants(root) {
         if let Ok(name) = names.get(e) {
@@ -305,7 +358,7 @@ fn on_soldier_ready(
             weights[0] = 1.0;
             commands.entity(e).insert((
                 AnimationGraphHandle(graph),
-                SoldierAnim { player: model.0, nodes, weights, phase: 0.0, aim_set: AIM_SET_IDLE, aim_row: 2, aim_t: 0.0 },
+                SoldierAnim { subject, nodes, weights, phase: 0.0, aim_set: AIM_SET_IDLE, aim_row: 2, aim_t: 0.0 },
             ));
         }
         if blue && let Ok((name, mat)) = mats.get(e) {
@@ -334,11 +387,15 @@ fn on_soldier_ready(
     }
 }
 
-/// Shows the launcher each player holds (`Player::weapon`, fixed for the life) and hides the other.
-fn sync_launcher_models(states: Option<Res<RenderStates>>, q: Query<(&SoldierAnim, &LauncherNodes)>, mut visibility: Query<&mut Visibility>) {
+/// Shows the launcher each player holds (`Player::weapon`, fixed for the life) and hides the
+/// other; the gallery's soldiers carry whichever they were thrown with.
+fn sync_launcher_models(states: Option<Res<RenderStates>>, poses: Res<TargetPoses>, q: Query<(&SoldierAnim, &LauncherNodes)>, mut visibility: Query<&mut Visibility>) {
     let Some(states) = states else { return };
     for (anim, nodes) in &q {
-        let held = states.cur.players[anim.player as usize].weapon as usize;
+        let held = match anim.subject {
+            Subject::Player(i) => states.cur.players[i as usize].weapon as usize,
+            Subject::Target(slot) => poses.0.get(slot as usize).copied().flatten().map(|p| p.weapon as usize).unwrap_or(0),
+        };
         for (i, e) in nodes.0.iter().enumerate() {
             let target = if i == held { Visibility::Inherited } else { Visibility::Hidden };
             if let Some(e) = e
@@ -367,6 +424,7 @@ fn grid_weights(x: f32, y: f32) -> [f32; 9] {
 
 fn drive_soldier_anims(
     states: Option<Res<RenderStates>>,
+    poses: Res<TargetPoses>,
     fx: Res<PendingFx>,
     time: Res<Time<Real>>,
     mut q: Query<(&mut SoldierAnim, &mut AnimationPlayer)>,
@@ -375,17 +433,32 @@ fn drive_soldier_anims(
     let dt = time.delta_secs().min(0.1);
     let smoothing = 1.0 - (-dt * 12.0).exp();
     for (mut anim, mut player) in &mut q {
-        let i = anim.player as usize;
-        let p = &states.cur.players[i];
-        let vel = p.velocity;
+        // What the model is doing: a player's movement state, or a gallery soldier's flight
+        // (always airborne, facing its yaw, aiming level).
+        let (vel, yaw, pitch, ground, ducked) = match anim.subject {
+            Subject::Player(i) => {
+                let p = &states.cur.players[i as usize];
+                (p.velocity, p.view_angles.yaw, p.view_angles.pitch, p.on_ground(), p.ducked)
+            }
+            Subject::Target(slot) => {
+                let Some(pose) = poses.0.get(slot as usize).copied().flatten() else { continue };
+                // A ragdoll keeps the pose it died in; a slot reused for a live soldier plays on.
+                if pose.ragdoll.is_some() {
+                    player.pause_all();
+                    continue;
+                }
+                if player.all_paused() {
+                    player.resume_all();
+                }
+                (pose.velocity, pose.yaw, 0.0, false, false)
+            }
+        };
         let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
-        let ground = p.on_ground();
-        let ducked = p.ducked;
         let moving = ground && speed > 15.0;
 
         // Pose parameters (`ComputePoseParam_MoveYaw`): velocity in the body's frame, normalised
         // by the class speed, with `move_y` positive to the right.
-        let (sy, cy) = p.view_angles.yaw.to_radians().sin_cos();
+        let (sy, cy) = yaw.to_radians().sin_cos();
         let fwd = vel.x * cy + vel.y * sy;
         let left = -vel.x * sy + vel.y * cy;
         let max_speed = if ducked { CROUCH_SPEED } else { SOLDIER_MAX_SPEED };
@@ -413,7 +486,7 @@ fn drive_soldier_anims(
         anim.phase += dt * rate;
 
         // Aim matrix: body_pitch = -eye pitch, rows at 90/45/0/-45; applied in `apply_soldier_pose`.
-        let body_pitch = (-p.view_angles.pitch).clamp(AIM_ROW_PITCH[3], AIM_ROW_PITCH[0]);
+        let body_pitch = (-pitch).clamp(AIM_ROW_PITCH[3], AIM_ROW_PITCH[0]);
         let f = ((AIM_ROW_PITCH[0] - body_pitch) / 45.0).clamp(0.0, 2.999);
         anim.aim_row = f.floor() as usize;
         anim.aim_t = f - anim.aim_row as f32;
@@ -450,12 +523,12 @@ fn drive_soldier_anims(
         // Gestures.
         for ev in &fx.events {
             match *ev {
-                SimEvent::RocketFired { shooter, .. } if shooter as usize == i => {
+                SimEvent::RocketFired { shooter, .. } if anim.subject == Subject::Player(shooter) => {
                     let node = if ducked { nodes.attack_crouch } else { nodes.attack_stand };
                     player.stop(if ducked { nodes.attack_stand } else { nodes.attack_crouch });
                     player.start(node).set_weight(1.0).set_repeat(RepeatAnimation::Never);
                 }
-                SimEvent::Landed { player: who, .. } if who as usize == i => {
+                SimEvent::Landed { player: who, .. } if anim.subject == Subject::Player(who) => {
                     player.start(nodes.land).set_weight(1.0).set_repeat(RepeatAnimation::Never);
                 }
                 _ => {}
@@ -551,9 +624,31 @@ fn solve_hand_ik(ik: &IkChain, parents: &Query<&ChildOf>, transforms: &mut Query
 }
 
 /// After Bevy has written the graph's pose: the aim matrix (`base * delta`, rows blended by
-/// `body_pitch`) and then the left-hand IK, before transforms propagate to the meshes.
-fn apply_soldier_pose(q: Query<(&SoldierAnim, &SoldierPose)>, parents: Query<&ChildOf>, mut transforms: Query<&mut Transform>) {
-    for (anim, pose) in &q {
+/// `body_pitch`) and then the left-hand IK, before transforms propagate to the meshes. A ragdoll
+/// gets neither: its limbs swing loosely about the pose the animation froze in, hard at first
+/// and settling as it flies.
+fn apply_soldier_pose(mut q: Query<(&SoldierAnim, &mut SoldierPose)>, poses: Res<TargetPoses>, parents: Query<&ChildOf>, mut transforms: Query<&mut Transform>) {
+    for (anim, mut pose) in &mut q {
+        let ragdoll = match anim.subject {
+            Subject::Target(slot) => poses.0.get(slot as usize).copied().flatten().and_then(|p| p.ragdoll),
+            Subject::Player(_) => None,
+        };
+        if let Some(t) = ragdoll {
+            if pose.limb_base.len() != pose.limbs.len() {
+                pose.limb_base = pose.limbs.iter().map(|e| transforms.get(*e).map(|tf| tf.rotation).unwrap_or(Quat::IDENTITY)).collect();
+            }
+            let amp = 0.15 + 0.7 / (1.0 + 2.0 * t);
+            for (i, (&bone, &base)) in pose.limbs.iter().zip(&pose.limb_base).enumerate() {
+                let k = i as f32;
+                let a = amp * (t * (5.0 + 0.7 * k) + k * 1.7).sin();
+                let b = amp * 0.7 * (t * (6.5 + 0.5 * k) + k * 2.3).sin();
+                if let Ok(mut tf) = transforms.get_mut(bone) {
+                    tf.rotation = base * Quat::from_euler(EulerRot::XYZ, a, b, 0.0);
+                }
+            }
+            continue;
+        }
+        pose.limb_base.clear();
         if let Some(set) = pose.sets.get(anim.aim_set) {
             let r0 = anim.aim_row.min(3);
             let r1 = (r0 + 1).min(3);

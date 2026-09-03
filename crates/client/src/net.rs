@@ -12,6 +12,7 @@ use bevy::tasks::IoTaskPool;
 use bevy_ggrs::prelude::*;
 use bevy_ggrs::{LocalPlayers, ggrs::DesyncDetection};
 use endif_sim::PlayerInput;
+use endif_sim::Arena;
 use matchbox_socket::{ChannelConfig, MessageLoopFuture, PeerId, PeerState, WebRtcChannel, WebRtcSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -61,6 +62,8 @@ const MSG_HELLO: u8 = 1;
 pub enum MatchKind {
     /// Local sync-test session, both players controlled locally (player 1 idle).
     Practice,
+    /// Local sync-test session in the Fruit Ninja gallery (see `crate::fruit`).
+    FruitNinja,
     /// Peer-to-peer private room. No ratings; finished rounds go into the history as casual.
     Room { code: String },
     /// A quick play pairing: like a private room (unrated, rounds go on until someone leaves),
@@ -387,6 +390,7 @@ pub enum NetCommand {
     /// The quick play queue paired us: join the room.
     StartQuick(QuickMatch),
     Practice,
+    FruitNinja,
     Leave,
 }
 
@@ -656,22 +660,10 @@ fn handle_net_commands(
                 start_room(&mut commands, &cfg, info.room.clone(), MatchKind::Quick(info.clone()), &mut next);
             }
             NetCommand::Practice => {
-                let session = SessionBuilder::<Config>::new()
-                    .with_num_players(2)
-                    .expect("num players")
-                    .with_check_distance(2)
-                    .add_player(PlayerType::Local, 0)
-                    .expect("player 0")
-                    .add_player(PlayerType::Local, 1)
-                    .expect("player 1")
-                    .start_synctest_session()
-                    .expect("synctest session");
-                names.0 = [account.display_name(), "DUMMY".to_string()];
-                commands.insert_resource(PendingSession(Some(Session::SyncTest(session))));
-                commands.insert_resource(LocalHandle(0));
-                commands.insert_resource(MatchSeed(0xE11D1F));
-                commands.insert_resource(MatchKind::Practice);
-                next.set(AppState::InGame);
+                start_local(&mut commands, &account, &mut names, MatchKind::Practice, Arena::classic_square(), &mut next);
+            }
+            NetCommand::FruitNinja => {
+                start_local(&mut commands, &account, &mut names, MatchKind::FruitNinja, Arena::fruit_ninja(), &mut next);
             }
             NetCommand::Leave => {
                 next.set(AppState::Menu);
@@ -680,8 +672,32 @@ fn handle_net_commands(
     }
 }
 
+/// An offline match: a sync-test session with both players local. The second player never
+/// moves (in the gallery its input carries the options instead) and the session re-simulates
+/// every frame, which doubles as a determinism check of the simulation.
+fn start_local(commands: &mut Commands, account: &crate::account::Account, names: &mut PlayerNames, kind: MatchKind, arena: Arena, next: &mut NextState<AppState>) {
+    let session = SessionBuilder::<Config>::new()
+        .with_num_players(2)
+        .expect("num players")
+        .with_check_distance(2)
+        .add_player(PlayerType::Local, 0)
+        .expect("player 0")
+        .add_player(PlayerType::Local, 1)
+        .expect("player 1")
+        .start_synctest_session()
+        .expect("synctest session");
+    names.0 = [account.display_name(), "DUMMY".to_string()];
+    commands.insert_resource(PendingSession(Some(Session::SyncTest(session))));
+    commands.insert_resource(LocalHandle(0));
+    commands.insert_resource(MatchSeed(0xE11D1F));
+    commands.insert_resource(crate::game::ArenaRes(arena));
+    commands.insert_resource(kind);
+    next.set(AppState::InGame);
+}
+
 fn start_room(commands: &mut Commands, cfg: &ClientConfig, code: String, kind: MatchKind, next: &mut NextState<AppState>) {
     let (socket, loop_result) = open_socket(&cfg.room_url(&code), cfg);
+    commands.insert_resource(crate::game::ArenaRes(Arena::classic_square()));
     commands.insert_resource(MatchSeed(seed_from_room(&code)));
     commands.insert_resource(kind);
     commands.insert_resource(RoomConnection {

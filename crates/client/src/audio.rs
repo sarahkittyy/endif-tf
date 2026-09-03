@@ -37,8 +37,10 @@ pub struct Sfx {
     pub hitsound: Clip,
     pub killsound: Clip,
     /// Chain sting (a kill on a victim who had not landed since respawning), played pitched up
-    /// by `CHAIN_SEMITONES` for the multiplier.
+    /// by `CHAIN_SEMITONES` for the multiplier; the gallery plays it every fifth hit in a row.
     pub killstreak: Clip,
+    /// The "your team won" flourish, for a new gallery record.
+    pub record: Clip,
     pub freeze_cam: Clip,
     pub button_click: Clip,
     pub button_rollover: Clip,
@@ -77,6 +79,7 @@ impl Sfx {
             self.hitsound.clone(),
             self.killsound.clone(),
             self.killstreak.clone(),
+            self.record.clone(),
             self.freeze_cam.clone(),
             self.button_click.clone(),
             self.button_rollover.clone(),
@@ -123,6 +126,7 @@ impl FromWorld for Sfx {
             hitsound: load("ui/hitsound"),
             killsound: load("ui/killsound"),
             killstreak: load("misc/killstreak"),
+            record: load("misc/your_team_won"),
             freeze_cam: load("misc/freeze_cam"),
             button_click: load("ui/buttonclick"),
             button_rollover: load("ui/buttonrollover"),
@@ -213,11 +217,11 @@ fn apply_volume(
     }
 }
 
-fn pick(clips: &[Clip]) -> &Clip {
+pub(crate) fn pick(clips: &[Clip]) -> &Clip {
     &clips[rand::random::<usize>() % clips.len()]
 }
 
-fn play(commands: &mut Commands, clip: &Clip, volume: f32) {
+pub(crate) fn play(commands: &mut Commands, clip: &Clip, volume: f32) {
     commands.spawn((AudioPlayer::new(clip.clone()), PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume))));
 }
 
@@ -362,6 +366,16 @@ fn game_sounds(
                 let v = if *victim == me { 0.8 } else { 0.55 };
                 play(&mut commands, pick(&sfx.soldier_death), v);
             }
+            // Fruit Ninja: a rocket that flew into a soldier rings the crit ding; a splash that
+            // only pushed one is silent.
+            SimEvent::TargetHit { direct: true, .. } => play(&mut commands, pick(&sfx.crit_hit), 0.9),
+            // Fruit Ninja: the chain sting climbs a step every fifth soldier hit in a row.
+            SimEvent::Chain { chain } => {
+                let tier = ((*chain / endif_sim::fruit::CHAIN_STEP) as usize).saturating_sub(1).min(CHAIN_SEMITONES.len() - 1);
+                play_pitched(&mut commands, &sfx.killstreak, 0.7, CHAIN_SEMITONES[tier]);
+            }
+            // Fruit Ninja rounds: every one of the round's soldiers hit is a flawless victory.
+            SimEvent::RoundOver { hits, .. } if *hits >= endif_sim::fruit::ROUND_SIZE => play(&mut commands, pick(&sfx.announcer_flawless_victory), 0.9),
             SimEvent::RoundWon { winner, score } => {
                 let won = *winner == me;
                 let flawless = score.iter().any(|s| *s == 0);

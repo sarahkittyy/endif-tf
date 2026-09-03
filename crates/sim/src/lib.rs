@@ -23,6 +23,7 @@ pub fn protocol_id() -> String {
 pub mod arena;
 pub mod checksum;
 pub mod consts;
+pub mod fruit;
 pub mod input;
 pub mod math;
 pub mod movement;
@@ -35,6 +36,7 @@ pub mod world;
 pub use arena::{Arena, Spawn};
 pub use checksum::DetHasher;
 pub use consts::*;
+pub use fruit::{Difficulty, FruitSettings, FruitState, Preset, Target};
 pub use input::*;
 pub use math::{QAngle, Vec3};
 pub use player::{FL_DUCKING, FL_ONGROUND, Player, Weapon};

@@ -9,6 +9,9 @@ mod assets;
 mod audio;
 mod config;
 mod copylink;
+#[cfg(not(target_arch = "wasm32"))]
+mod fullscreen;
+mod fruit;
 mod game;
 mod hud;
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,6 +109,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     prefer_reachable_display();
 
+    let settings = settings::Settings::load();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -114,6 +118,8 @@ fn main() {
                     title: "endif.tf".to_string(),
                     resolution: WindowResolution::new(1420, 800),
                     present_mode: PresentMode::AutoNoVsync,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    mode: fullscreen::mode_for(settings.fullscreen),
                     #[cfg(target_arch = "wasm32")]
                     canvas: Some("#endif-canvas".to_string()),
                     #[cfg(target_arch = "wasm32")]
@@ -153,7 +159,7 @@ fn main() {
         main_world.write_message(AppExit::error());
         RenderErrorPolicy::StopRendering
     }))
-    .insert_resource(settings::Settings::load());
+    .insert_resource(settings);
     let cfg = config::ClientConfig::load();
     app.insert_resource(account::Account::load(cfg.player_name.clone()))
         .insert_resource(cfg)
@@ -175,7 +181,14 @@ fn main() {
             particles::ParticlesPlugin,
             copylink::CopyLinkPlugin,
         ))
-        .add_plugins((warmup::WarmupPlugin, hud::HudPlugin, loading::LoadingPlugin));
+        .add_plugins((
+            warmup::WarmupPlugin,
+            hud::HudPlugin,
+            fruit::FruitPlugin,
+            loading::LoadingPlugin,
+            #[cfg(not(target_arch = "wasm32"))]
+            fullscreen::FullscreenPlugin,
+        ));
     app.run();
 }
 

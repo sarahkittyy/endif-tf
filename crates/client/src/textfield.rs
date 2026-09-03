@@ -241,12 +241,15 @@ fn field_keys(
     }
     let modifier = key_state.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight, KeyCode::AltLeft, KeyCode::AltRight]);
     let shift = key_state.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let alt = crate::settings::alt_held(&key_state);
     for ev in keys.read() {
         if !ev.state.is_pressed() {
             continue;
         }
         match &ev.logical_key {
             Key::Character(_) | Key::Space if modifier => {}
+            // Alt+Enter is the fullscreen toggle, not a submit.
+            Key::Enter if alt => {}
             Key::Character(c) => push(&mut form, focus, c.as_str()),
             Key::Space => push(&mut form, focus, " "),
             Key::Backspace => {

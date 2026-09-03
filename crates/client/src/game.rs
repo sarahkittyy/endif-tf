@@ -87,6 +87,9 @@ enum FxKey {
     RoundWon(u8),
     Landed(u8),
     Jumped(u8),
+    TargetHit(u32),
+    Chain(u32),
+    RoundOver,
 }
 
 impl FxKey {
@@ -100,6 +103,9 @@ impl FxKey {
             SimEvent::RoundWon { winner, .. } => FxKey::RoundWon(winner),
             SimEvent::Landed { player, .. } => FxKey::Landed(player),
             SimEvent::Jumped { player } => FxKey::Jumped(player),
+            SimEvent::TargetHit { id, .. } => FxKey::TargetHit(id),
+            SimEvent::Chain { chain } => FxKey::Chain(chain),
+            SimEvent::RoundOver { .. } => FxKey::RoundOver,
         }
     }
 }
@@ -229,6 +235,7 @@ impl Plugin for GamePlugin {
             .init_resource::<PendingFx>()
             .init_resource::<MouseCaptured>()
             .init_resource::<LockRequestedAt>()
+            // Replaced for every match (`net::start_local` / `start_room`); this is for the warm-up.
             .insert_resource(ArenaRes(Arena::classic_square()))
             .add_systems(ReadInputs, read_local_inputs)
             .add_systems(GgrsSchedule, step_sim)
@@ -239,6 +246,7 @@ impl Plugin for GamePlugin {
                 (capture_cursor, accumulate_look)
                     .chain()
                     .after(InputSystems)
+                    .after(bevy::ui::UiSystems::Focus)
                     .before(RunGgrsSystems)
                     .run_if(in_state(AppState::InGame)),
             )
@@ -309,8 +317,20 @@ fn setup_match(
     pending: Option<ResMut<crate::net::PendingSession>>,
 ) {
     // Nobody dies in practice, so a launcher change would never arrive: apply it at once there.
-    let practice = matches!(kind.as_deref(), Some(crate::net::MatchKind::Practice));
-    let mut sim = SimState::new(seed.0, Rules { instant_weapon_switch: practice, ..Rules::default() });
+    // The gallery is the same, and a fall off its platform is a quick respawn on the spot, not
+    // the high, flung respawn of a match.
+    let rules = match kind.as_deref() {
+        Some(crate::net::MatchKind::Practice) => Rules { instant_weapon_switch: true, ..Rules::default() },
+        Some(crate::net::MatchKind::FruitNinja) => Rules {
+            instant_weapon_switch: true,
+            fruit_ninja: true,
+            respawn_height: 0,
+            respawn_delay_ticks: crate::fruit::FALL_RESPAWN_TICKS,
+            ..Rules::default()
+        },
+        _ => Rules::default(),
+    };
+    let mut sim = SimState::new(seed.0, rules);
     // Spawn everyone so the first rendered frame has players; the launchers are picked from the
     // first inputs GGRS delivers.
     sim.begin(&arena.0);
@@ -329,7 +349,10 @@ fn setup_match(
     }
 }
 
-/// Locks the cursor on click (browsers require a user gesture for pointer lock).
+/// Locks the cursor on click (browsers require a user gesture for pointer lock). A click on a
+/// widget that is part of the game view (the Fruit Ninja frame and score strip, reachable after
+/// Tab released the mouse) is for the widget and does not grab.
+#[allow(clippy::too_many_arguments)]
 fn capture_cursor(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -339,9 +362,11 @@ fn capture_cursor(
     mut captured: ResMut<MouseCaptured>,
     mut requested: ResMut<LockRequestedAt>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    widgets: Query<&Interaction>,
 ) {
     let Ok(mut cursor) = cursor.single_mut() else { return };
     let overlay = screen.blocks_game_input();
+    let on_widget = widgets.iter().any(|i| *i != Interaction::None);
     // Losing the window (alt-tab, another app, a browser tab switch) drops the grab on every
     // platform, so the flag and the prompt follow it and the next click grabs again.
     let lost_focus = focus.read().any(|f| !f.focused);
@@ -353,7 +378,7 @@ fn capture_cursor(
         requested.0 = None;
     }
     let resume = screen.is_changed() && !overlay;
-    if !overlay && !captured.0 && !lost_focus && (mouse.just_pressed(MouseButton::Left) || resume) {
+    if !overlay && !captured.0 && !lost_focus && ((mouse.just_pressed(MouseButton::Left) && !on_widget) || resume) {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
         captured.0 = true;
@@ -422,6 +447,7 @@ fn accumulate_look(
     look.pitch = (look.pitch + d.y * settings.pitch_per_count()).clamp(-MAX_PITCH, MAX_PITCH);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_local_inputs(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -432,7 +458,10 @@ fn read_local_inputs(
     captured: Res<MouseCaptured>,
     settings: Res<Settings>,
     screen: Res<UiScreen>,
+    kind: Option<Res<crate::net::MatchKind>>,
+    countdown: Res<crate::fruit::Countdown>,
 ) {
+    let fruit = matches!(kind.as_deref(), Some(crate::net::MatchKind::FruitNinja));
     let mut inputs = HashMap::default();
     for handle in &local_players.0 {
         let input = if *handle == local.0 {
@@ -461,6 +490,9 @@ fn read_local_inputs(
                 Weapon::Stock => IN_WEAPON_STOCK,
             };
             PlayerInput { buttons, pitch: look.pitch, yaw: look.yaw }
+        } else if fruit {
+            // The gallery's idle player: its input carries the options (see `endif_sim::fruit`).
+            settings.fruit_settings(countdown.active()).to_input()
         } else {
             // Second local player in practice mode: stands still.
             PlayerInput::default()

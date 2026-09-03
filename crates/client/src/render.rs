@@ -9,7 +9,9 @@ use crate::particles::Particles;
 use crate::viewmodel::{self, VIEWMODEL_LAYER};
 use crate::{AppState, GameEntity};
 use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::Skybox;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension};
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::light::{DirectionalLight, GlobalAmbientLight, NotShadowCaster, PointLight};
 use bevy::math::Affine2;
@@ -20,6 +22,18 @@ use endif_sim::{SimEvent, SimState};
 
 /// One Source unit is one inch.
 pub const UNIT: f32 = 0.0254;
+
+/// The haze at the skybox's horizon (`tools/tf2/skybox.py` prints it): the clear colour behind
+/// the sky, and what the gallery's fog fades into.
+pub const SKY: Color = Color::srgb_u8(217, 209, 203);
+/// The skybox is an LDR picture; this is the luminance its white is shown at.
+const SKY_BRIGHTNESS: f32 = 1500.0;
+/// Scorch marks kept at once; the oldest goes when one more lands.
+const BURN_MARK_LIMIT: usize = 100;
+
+/// The scorch marks in the order they were made, so the oldest can be dropped.
+#[derive(Resource, Default)]
+pub struct BurnMarks(std::collections::VecDeque<Entity>);
 
 /// `w_rocket` is modelled along -Y in Source (nose at -Y, the `trail` attachment at +Y), which is
 /// +Z after the glTF root transform.
@@ -81,9 +95,11 @@ pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(Color::srgb(0.53, 0.68, 0.85)))
+        app.insert_resource(ClearColor(SKY))
             .insert_resource(GlobalAmbientLight { color: Color::srgb(0.9, 0.93, 1.0), brightness: 900.0, ..default() })
-            .add_systems(OnEnter(AppState::InGame), setup_scene)
+            .init_resource::<BurnMarks>()
+            .add_systems(OnEnter(AppState::InGame), (setup_scene, |mut burns: ResMut<BurnMarks>| burns.0.clear()))
+            .add_systems(Update, prepare_skybox)
             .add_systems(
                 Update,
                 (sync_players, sync_rockets, spawn_fx, animate_explosions, update_camera)
@@ -93,6 +109,7 @@ impl Plugin for RenderPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -100,8 +117,81 @@ fn setup_scene(
     arena: Res<ArenaRes>,
     assets: Res<GameAssets>,
     local: Res<LocalHandle>,
+    kind: Option<Res<crate::net::MatchKind>>,
+    server: Res<AssetServer>,
+    textures: Option<Res<crate::fruit::FruitTextures>>,
 ) {
     let arena = &arena.0;
+    let fruit = matches!(kind.as_deref(), Some(crate::net::MatchKind::FruitNinja));
+    if fruit {
+        crate::fruit::spawn_arena(&mut commands, &mut meshes, &mut materials, &server, textures.as_deref());
+    } else {
+        spawn_classic_arena(&mut commands, &mut meshes, &mut materials, arena, &assets);
+    }
+
+    // Sun + a soft sky fill from the opposite side (TF2 lights models with the ambient cube plus
+    // the sun; a single directional light leaves the back of everything flat and dull). Both light
+    // the world and the viewmodel layer.
+    commands.spawn((
+        GameEntity,
+        DirectionalLight { illuminance: 15_000.0, shadow_maps_enabled: true, ..default() },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.6, 0.0)),
+        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
+    ));
+    commands.spawn((
+        GameEntity,
+        DirectionalLight { illuminance: 2_000.0, color: Color::srgb(0.85, 0.92, 1.0), shadow_maps_enabled: false, ..default() },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.6 + std::f32::consts::PI, 0.0)),
+        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
+    ));
+    // Floor bounce, shining straight up: the bottom face of Source's ambient cube. It is what
+    // lights the underside of the ceiling (nothing else reaches it) and the undersides of models.
+    commands.spawn((
+        GameEntity,
+        DirectionalLight { illuminance: 3_500.0, color: Color::srgb(0.95, 0.92, 0.88), shadow_maps_enabled: false, ..default() },
+        Transform::default().looking_to(Vec3::Y, Vec3::X),
+        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
+    ));
+
+    // Scorch decal: `decals/scorch1` is a DecalModulate material (dst × src × 2, baked into the
+    // PNG), drawn with a multiply blend just above the surface.
+    let burn_mesh = meshes.add(Rectangle::new(48.0 * UNIT, 48.0 * UNIT));
+    let burn_mat = materials.add(StandardMaterial {
+        base_color_texture: Some(assets.scorch.clone()),
+        alpha_mode: AlphaMode::Multiply,
+        unlit: true,
+        double_sided: true,
+        cull_mode: None,
+        depth_bias: -1.0,
+        ..default()
+    });
+    commands.insert_resource(Assets3d { burn_mesh, burn_mat });
+
+    // Camera + viewmodel. The gallery hangs over a void: fog swallows the pole's lower end.
+    let mut camera = commands.spawn((
+        GameEntity,
+        MainCamera,
+        Camera3d::default(),
+        tf2_look(),
+        Projection::Perspective(PerspectiveProjection {
+            // TF2 fov_desired 90 is defined at 4:3; keep the same vertical FOV on any aspect ratio.
+            fov: viewmodel::vertical_fov(90.0),
+            near: 0.03,
+            ..default()
+        }),
+        Transform::from_xyz(0.0, 1.7, 0.0),
+    ));
+    camera.insert(Skybox { image: Some(assets.skybox.clone()), brightness: SKY_BRIGHTNESS, rotation: Quat::IDENTITY });
+    if fruit {
+        camera.insert(crate::fruit::fog());
+    }
+    let camera = camera.id();
+    viewmodel::spawn(&mut commands, camera, &assets, local.0 == 1);
+}
+
+/// The classic square arena: concrete floor and ceiling, four textured walls with the airshot
+/// line painted on them.
+fn spawn_classic_arena(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>, arena: &endif_sim::Arena, assets: &GameAssets) {
     // The visible walls are the outer (rocket) walls; players stop at the invisible inner walls.
     let h = arena.outer_half_size * UNIT;
     let span = arena.outer_half_size * 2.0;
@@ -184,62 +274,24 @@ fn setup_scene(
             Transform::from_translation(Vec3::new(pos.x, line_y, pos.z) + inward),
         ));
     }
+}
 
-    // Sun + a soft sky fill from the opposite side (TF2 lights models with the ambient cube plus
-    // the sun; a single directional light leaves the back of everything flat and dull). Both light
-    // the world and the viewmodel layer.
-    commands.spawn((
-        GameEntity,
-        DirectionalLight { illuminance: 15_000.0, shadow_maps_enabled: true, ..default() },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.6, 0.0)),
-        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
-    ));
-    commands.spawn((
-        GameEntity,
-        DirectionalLight { illuminance: 2_000.0, color: Color::srgb(0.85, 0.92, 1.0), shadow_maps_enabled: false, ..default() },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.6 + std::f32::consts::PI, 0.0)),
-        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
-    ));
-    // Floor bounce, shining straight up: the bottom face of Source's ambient cube. It is what
-    // lights the underside of the ceiling (nothing else reaches it) and the undersides of models.
-    commands.spawn((
-        GameEntity,
-        DirectionalLight { illuminance: 3_500.0, color: Color::srgb(0.95, 0.92, 0.88), shadow_maps_enabled: false, ..default() },
-        Transform::default().looking_to(Vec3::Y, Vec3::X),
-        RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
-    ));
-
-    // Scorch decal: `decals/scorch1` is a DecalModulate material (dst × src × 2, baked into the
-    // PNG), drawn with a multiply blend just above the surface.
-    let burn_mesh = meshes.add(Rectangle::new(48.0 * UNIT, 48.0 * UNIT));
-    let burn_mat = materials.add(StandardMaterial {
-        base_color_texture: Some(assets.scorch.clone()),
-        alpha_mode: AlphaMode::Multiply,
-        unlit: true,
-        double_sided: true,
-        cull_mode: None,
-        depth_bias: -1.0,
-        ..default()
-    });
-    commands.insert_resource(Assets3d { burn_mesh, burn_mat });
-
-    // Camera + viewmodel.
-    let camera = commands
-        .spawn((
-            GameEntity,
-            MainCamera,
-            Camera3d::default(),
-            tf2_look(),
-            Projection::Perspective(PerspectiveProjection {
-                // TF2 fov_desired 90 is defined at 4:3; keep the same vertical FOV on any aspect ratio.
-                fov: viewmodel::vertical_fov(90.0),
-                near: 0.03,
-                ..default()
-            }),
-            Transform::from_xyz(0.0, 1.7, 0.0),
-        ))
-        .id();
-    viewmodel::spawn(&mut commands, camera, &assets, local.0 == 1);
+/// The skybox file is a plain picture of the six faces stacked; once it has loaded it is
+/// re-read as a six-layer cube texture (done once, the image keeps the new layout).
+fn prepare_skybox(assets: Res<GameAssets>, mut images: ResMut<Assets<Image>>, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let Some(mut image) = images.get_mut(&assets.skybox) else { return };
+    *done = true;
+    if image.texture_descriptor.array_layer_count() != 1 {
+        return;
+    }
+    if let Err(e) = image.reinterpret_stacked_2d_as_array(6) {
+        warn!("skybox.png is not six stacked square faces: {e:?}");
+        return;
+    }
+    image.texture_view_descriptor = Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), ..default() });
 }
 
 /// Ticks past the newest simulated state the view keeps moving at the last velocity when no new
@@ -247,7 +299,7 @@ fn setup_scene(
 /// motion instead of a freeze, like `cl_extrapolate` in Source; after that the view holds, since
 /// guessing further only makes the correction bigger when the frames do come.
 const EXTRAPOLATE_TICKS: f64 = 2.0;
-const TICK_SECS: f32 = 1.0 / crate::net::ROLLBACK_FPS as f32;
+pub(crate) const TICK_SECS: f32 = 1.0 / crate::net::ROLLBACK_FPS as f32;
 
 /// Position and view offset of player `i` at `alpha` ticks after the previous state: between the
 /// two states up to 1, extrapolated from the current one beyond that.
@@ -268,7 +320,7 @@ fn lerp_state(prev: &SimState, cur: &SimState, alpha: f32, i: usize) -> (SVec3, 
 
 /// Ticks since the previous state: 0..1 while a new state arrives every tick, up to
 /// `1 + EXTRAPOLATE_TICKS` while waiting for one.
-fn interp_alpha(states: &RenderStates, now: f64) -> f32 {
+pub(crate) fn interp_alpha(states: &RenderStates, now: f64) -> f32 {
     let dt = 1.0 / crate::net::ROLLBACK_FPS as f64;
     ((now - states.last_advance) / dt).clamp(0.0, 1.0 + EXTRAPOLATE_TICKS) as f32
 }
@@ -341,6 +393,7 @@ pub fn sync_rockets(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_fx(
     mut commands: Commands,
     fx: Res<PendingFx>,
@@ -348,11 +401,13 @@ pub fn spawn_fx(
     arena: Res<ArenaRes>,
     time: Res<Time<Real>>,
     mut particles: ResMut<Particles>,
+    mut burns: ResMut<BurnMarks>,
+    wall: Query<(Entity, &Transform), With<crate::fruit::WallVis>>,
 ) {
     let Some(assets) = assets else { return };
     let now = time.elapsed_secs_f64();
     for ev in &fx.events {
-        if let SimEvent::Explosion { origin, normal, hit_player, .. } = *ev {
+        if let SimEvent::Explosion { origin, normal, hit_player, hit_target, .. } = *ev {
             particles.explosion(to_bevy(origin), to_bevy_dir(normal));
             commands.spawn((
                 GameEntity,
@@ -360,10 +415,11 @@ pub fn spawn_fx(
                 Explosion { t0: now },
                 Transform::from_translation(to_bevy(origin) + to_bevy_dir(normal) * 0.3),
             ));
-            // Scorch mark on the world surface that was hit. A direct hit on a player has the
-            // player's hull as its "surface", so project the mark onto the ground below instead
-            // (only when the ground is close enough for the blast to plausibly scorch it).
-            let mark = if hit_player.is_some() {
+            // Scorch mark on the world surface that was hit. A direct hit on a player (or a
+            // gallery soldier) has the hull as its "surface", so project the mark onto the ground
+            // below instead (only when the ground is close enough for the blast to plausibly
+            // scorch it).
+            let mark = if hit_player.is_some() || hit_target.is_some() {
                 let env = endif_sim::TraceEnv::world_only(&arena.0.rocket_brushes);
                 let tr = endif_sim::trace::trace_line(&env, origin, origin - SVec3::new(0.0, 0.0, 120.0));
                 (tr.fraction < 1.0).then_some((tr.endpos, tr.normal))
@@ -374,13 +430,32 @@ pub fn spawn_fx(
                 let n = to_bevy_dir(n_src);
                 if n != Vec3::ZERO {
                     let spin = Quat::from_axis_angle(n, particles.range(0.0, std::f32::consts::TAU));
-                    commands.spawn((
-                        GameEntity,
-                        Mesh3d(assets.burn_mesh.clone()),
-                        MeshMaterial3d(assets.burn_mat.clone()),
-                        NotShadowCaster,
-                        Transform::from_translation(to_bevy(pos) + n * 0.01).with_rotation(spin * Quat::from_rotation_arc(Vec3::Z, n)),
-                    ));
+                    let mut translation = to_bevy(pos) + n * 0.01;
+                    let rotation = spin * Quat::from_rotation_arc(Vec3::Z, n);
+                    // A mark on the gallery's wall belongs to the wall, which moves with the
+                    // distance option (the wall's root is translated only, so local = world - root).
+                    let on_wall = wall.single().ok().filter(|(_, root)| n.x < -0.5 && translation.x > root.translation.x - 0.1);
+                    if let Some((_, root)) = on_wall {
+                        translation -= root.translation;
+                    }
+                    let mark = commands
+                        .spawn((
+                            GameEntity,
+                            Mesh3d(assets.burn_mesh.clone()),
+                            MeshMaterial3d(assets.burn_mat.clone()),
+                            NotShadowCaster,
+                            Transform::from_translation(translation).with_rotation(rotation),
+                        ))
+                        .id();
+                    if let Some((root, _)) = on_wall {
+                        commands.entity(root).add_child(mark);
+                    }
+                    burns.0.push_back(mark);
+                    while burns.0.len() > BURN_MARK_LIMIT {
+                        if let Some(old) = burns.0.pop_front() {
+                            commands.entity(old).try_despawn();
+                        }
+                    }
                 }
             }
         }

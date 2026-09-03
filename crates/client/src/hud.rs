@@ -135,6 +135,9 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>,
     }
 
     // Top centre: RED (you) vs BLU (them) score with the frag limit between, match clock below.
+    // The Fruit Ninja gallery has its own score strip there (`fruit.rs`).
+    let fruit = matches!(kind.as_deref(), Some(MatchKind::FruitNinja));
+    if !fruit {
     commands.spawn((GameEntity, centred_strip(Val::Px(12.0)))).with_children(|p| {
         p.spawn(theme::panel(Node {
             flex_direction: FlexDirection::Row,
@@ -169,6 +172,7 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>,
             t.spawn((TimerText, theme.heading("0:00", 24.0, theme::TAN_LIGHT)));
         });
     });
+    }
 
     // Bottom right: rocket counter (clip / reserve) like the TF2 ammo panel.
     commands
@@ -189,7 +193,7 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>,
             p.spawn((ClipText, theme.heading("4", 64.0, theme::TAN_LIGHT)));
             p.spawn(Node { flex_direction: FlexDirection::Column, align_items: AlignItems::FlexStart, margin: UiRect::bottom(Val::Px(12.0)), ..default() })
                 .with_children(|c| {
-                    c.spawn((ReserveText, theme.heading("∞", 30.0, theme::OFF_WHITE)));
+                    c.spawn((ReserveText, theme.symbol("∞", 30.0, theme::OFF_WHITE)));
                     c.spawn(theme.label("ROCKETS", 11.0, theme::OFF_WHITE));
                 });
         });
@@ -233,7 +237,7 @@ fn setup_hud(mut commands: Commands, theme: Res<Theme>, local: Res<LocalHandle>,
         });
 
     // Top left: signal bars (online matches) + focus hint + connection warnings.
-    let online = !matches!(kind.as_deref(), None | Some(MatchKind::Practice));
+    let online = !matches!(kind.as_deref(), None | Some(MatchKind::Practice | MatchKind::FruitNinja));
     commands
         .spawn((
             GameEntity,

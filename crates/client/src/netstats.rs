@@ -333,7 +333,7 @@ fn apply_input_delay(
 
 /// The overlay, under the status panel at the top left, for online matches when asked for.
 fn spawn_overlay(mut commands: Commands, theme: Res<Theme>, cfg: Res<ClientConfig>, kind: Option<Res<MatchKind>>) {
-    if !cfg.netstats || matches!(kind.as_deref(), None | Some(MatchKind::Practice)) {
+    if !cfg.netstats || matches!(kind.as_deref(), None | Some(MatchKind::Practice | MatchKind::FruitNinja)) {
         return;
     }
     commands

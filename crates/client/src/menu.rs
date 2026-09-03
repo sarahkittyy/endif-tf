@@ -137,6 +137,8 @@ struct ScrollPane;
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 enum UiAction {
     Practice,
+    /// The offline Fruit Ninja gallery (see `crate::fruit`).
+    FruitNinja,
     CreateRoom,
     JoinRoom,
     /// Join the quick play queue (anyone).
@@ -359,6 +361,8 @@ struct PendingPaste(Option<ClipboardRead>);
 
 const BUTTON_W: f32 = 320.0;
 const BUTTON_H: f32 = 44.0;
+/// Space between the main menu's two columns of buttons.
+const MAIN_COLUMN_GAP: f32 = 18.0;
 const ROW_W: f32 = 660.0;
 const SLIDER_W: f32 = 260.0;
 const FIELD_W: f32 = 320.0;
@@ -531,6 +535,16 @@ fn panel_column(padding: f32) -> impl Bundle {
     })
 }
 
+/// One of the main menu's two columns of controls, laid out like the panel around them.
+fn main_column() -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::Center,
+        row_gap: Val::Px(4.0),
+        ..default()
+    }
+}
+
 /// A `panel_column` that is never taller than the window: past that its contents scroll. Clipping at
 /// the content box keeps the padding clear so scrolled rows never touch the rounded border.
 fn scrolling_panel_column(padding: f32, scroll: Vec2) -> impl Bundle {
@@ -561,7 +575,7 @@ fn section(theme: &Theme, title: &str) -> impl Bundle {
     )
 }
 
-fn no_wrap() -> TextLayout {
+pub(crate) fn no_wrap() -> TextLayout {
     TextLayout {
         linebreak: LineBreak::NoWrap,
         ..default()
@@ -596,7 +610,7 @@ fn row(
 
 /// Slider + value box for one setting. The slider is dragged; the value box is clicked to type an
 /// exact number.
-fn slider_controls(
+pub(crate) fn slider_controls(
     c: &mut RelatedSpawnerCommands<ChildOf>,
     theme: &Theme,
     s: &Settings,
@@ -1465,112 +1479,131 @@ fn spawn_main(
                 if status.update_available() {
                     update_banner(c, theme, status);
                 }
-                let quick = online_button(c, theme, "Quick play", UiAction::QuickPlay, offline);
-                count_child(c, quick, theme, account.stats, QueueKind::Quick);
-                let competitive = online_button(
-                    c,
-                    theme,
-                    "Competitive",
-                    UiAction::Competitive,
-                    ranked_offline,
-                );
-                count_child(c, competitive, theme, account.stats, QueueKind::Competitive);
-                c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
-                online_button(
-                    c,
-                    theme,
-                    "Create private room",
-                    UiAction::CreateRoom,
-                    offline,
-                );
-
-                c.spawn((
-                    theme.heading_flat("JOIN A ROOM", 20.0, theme::ORANGE),
-                    Node {
-                        margin: UiRect::new(
-                            Val::Px(0.0),
-                            Val::Px(0.0),
-                            Val::Px(10.0),
-                            Val::Px(2.0),
-                        ),
-                        ..default()
-                    },
-                ));
-                c.spawn(theme.label("type the six letter code", 13.0, theme::OFF_WHITE));
+                // Two columns under the banner: matchmaking (and practice) on the left; private
+                // rooms on the right with settings and volume at its foot. The right column is
+                // the taller, so the left's buttons sit at the top and its bottom stays clear.
                 c.spawn(Node {
-                    width: Val::Px(BUTTON_W - 8.0),
                     flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(6.0),
-                    margin: UiRect::vertical(Val::Px(4.0)),
+                    align_items: AlignItems::FlexStart,
+                    column_gap: Val::Px(MAIN_COLUMN_GAP),
                     ..default()
                 })
                 .with_children(|r| {
-                    r.spawn(theme::inset(Node {
-                        flex_grow: 1.0,
-                        height: Val::Px(54.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    }))
-                    .with_children(|b| {
-                        // Six of the widest glyph (`W W W W W W`) must still fit on one line: the
-                        // box is ~238 px wide, and wrapping would break the code across two rows.
-                        b.spawn((
-                            CodeField,
-                            theme.heading_flat(
-                                code_display(&typed.0, ROOM_CODE_LEN),
-                                30.0,
-                                theme::YELLOW,
-                            ),
-                            no_wrap(),
-                        ));
+                    r.spawn(main_column()).with_children(|c| {
+                        let quick =
+                            online_button(c, theme, "Quick play", UiAction::QuickPlay, offline);
+                        count_child(c, quick, theme, account.stats, QueueKind::Quick);
+                        let competitive = online_button(
+                            c,
+                            theme,
+                            "Competitive",
+                            UiAction::Competitive,
+                            ranked_offline,
+                        );
+                        count_child(c, competitive, theme, account.stats, QueueKind::Competitive);
+                        c.spawn(button(theme, "Practice (offline)", UiAction::Practice));
+                        c.spawn(button(theme, "Fruit Ninja", UiAction::FruitNinja));
                     });
-                    r.spawn(small_button(theme, "paste", UiAction::Paste));
-                });
-                if status.is_outdated() {
-                    c.spawn((
-                        theme.label(
-                            if cfg!(target_arch = "wasm32") {
-                                "a newer build is available: reload the page"
-                            } else {
-                                "a newer build is available: update the client"
-                            },
-                            13.0,
-                            theme::LIGHT_RED,
-                        ),
-                        Node {
-                            margin: UiRect::top(Val::Px(8.0)),
-                            ..default()
-                        },
-                    ));
-                }
-                online_button(c, theme, "Join room", UiAction::JoinRoom, offline);
-                c.spawn(button(theme, "Settings", UiAction::OpenSettings));
+                    r.spawn(main_column()).with_children(|c| {
+                        online_button(
+                            c,
+                            theme,
+                            "Create private room",
+                            UiAction::CreateRoom,
+                            offline,
+                        );
 
-                // Master volume, always within reach from the title screen. The slider's track has
-                // its own headroom above the bar, so the label sits right on top of it.
-                c.spawn((
-                    theme.heading_flat("VOLUME", 16.0, theme::TAN_LIGHT),
-                    Node {
-                        margin: UiRect::new(
-                            Val::Px(0.0),
-                            Val::Px(0.0),
-                            Val::Px(10.0),
-                            Val::Px(-6.0),
-                        ),
-                        ..default()
-                    },
-                ));
-                c.spawn(Node {
-                    width: Val::Px(BUTTON_W),
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::SpaceBetween,
-                    ..default()
-                })
-                .with_children(|r| {
-                    slider_controls(r, theme, s, Slider::Volume, BUTTON_W - 84.0 - 12.0)
+                        c.spawn((
+                            theme.heading_flat("JOIN A ROOM", 20.0, theme::ORANGE),
+                            Node {
+                                margin: UiRect::new(
+                                    Val::Px(0.0),
+                                    Val::Px(0.0),
+                                    Val::Px(10.0),
+                                    Val::Px(2.0),
+                                ),
+                                ..default()
+                            },
+                        ));
+                        c.spawn(theme.label("type the six letter code", 13.0, theme::OFF_WHITE));
+                        c.spawn(Node {
+                            width: Val::Px(BUTTON_W - 8.0),
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(6.0),
+                            margin: UiRect::vertical(Val::Px(4.0)),
+                            ..default()
+                        })
+                        .with_children(|r| {
+                            r.spawn(theme::inset(Node {
+                                flex_grow: 1.0,
+                                height: Val::Px(54.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            }))
+                            .with_children(|b| {
+                                // Six of the widest glyph (`W W W W W W`) must still fit on one
+                                // line: the box is ~238 px wide, and wrapping would break the
+                                // code across two rows.
+                                b.spawn((
+                                    CodeField,
+                                    theme.heading_flat(
+                                        code_display(&typed.0, ROOM_CODE_LEN),
+                                        30.0,
+                                        theme::YELLOW,
+                                    ),
+                                    no_wrap(),
+                                ));
+                            });
+                            r.spawn(small_button(theme, "paste", UiAction::Paste));
+                        });
+                        if status.is_outdated() {
+                            c.spawn((
+                                theme.label(
+                                    if cfg!(target_arch = "wasm32") {
+                                        "a newer build is available: reload the page"
+                                    } else {
+                                        "a newer build is available: update the client"
+                                    },
+                                    13.0,
+                                    theme::LIGHT_RED,
+                                ),
+                                Node {
+                                    margin: UiRect::top(Val::Px(8.0)),
+                                    ..default()
+                                },
+                            ));
+                        }
+                        online_button(c, theme, "Join room", UiAction::JoinRoom, offline);
+                        c.spawn(button(theme, "Settings", UiAction::OpenSettings));
+
+                        // Master volume, always within reach from the title screen. The slider's
+                        // track has its own headroom above the bar, so the label sits right on
+                        // top of it.
+                        c.spawn((
+                            theme.heading_flat("VOLUME", 16.0, theme::TAN_LIGHT),
+                            Node {
+                                margin: UiRect::new(
+                                    Val::Px(0.0),
+                                    Val::Px(0.0),
+                                    Val::Px(10.0),
+                                    Val::Px(-6.0),
+                                ),
+                                ..default()
+                            },
+                        ));
+                        c.spawn(Node {
+                            width: Val::Px(BUTTON_W),
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::SpaceBetween,
+                            ..default()
+                        })
+                        .with_children(|r| {
+                            slider_controls(r, theme, s, Slider::Volume, BUTTON_W - 84.0 - 12.0)
+                        });
+                    });
                 });
             });
     });
@@ -1731,7 +1764,7 @@ fn spawn_leaderboard(
     let (width, height) = match size {
         Some(s) => (Val::Px(s.x), Val::Px(s.y)),
         // Never measured (cannot happen: the main menu comes first): the main panel's usual width.
-        None => (Val::Px(BUTTON_W + 48.0), Val::Auto),
+        None => (Val::Px(2.0 * BUTTON_W + MAIN_COLUMN_GAP + 48.0), Val::Auto),
     };
     let column = title_screen(commands, theme, account, form);
     commands.entity(column).with_children(|p| {
@@ -3014,6 +3047,9 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
         UiAction::Practice => {
             ctx.cmds.write(NetCommand::Practice);
         }
+        UiAction::FruitNinja => {
+            ctx.cmds.write(NetCommand::FruitNinja);
+        }
         UiAction::CreateRoom => {
             ctx.cmds.write(NetCommand::CreateRoom);
         }
@@ -3435,6 +3471,7 @@ fn sync_settings_widgets(
 /// Typing into an open sensitivity value box. Enter applies, Esc cancels.
 fn edit_value_keys(
     mut keys: MessageReader<KeyboardInput>,
+    key_state: Res<ButtonInput<KeyCode>>,
     mut editing: ResMut<Editing>,
     mut settings: ResMut<Settings>,
 ) {
@@ -3442,11 +3479,14 @@ fn edit_value_keys(
         keys.clear();
         return;
     }
+    let alt = crate::settings::alt_held(&key_state);
     for ev in keys.read() {
         if !ev.state.is_pressed() {
             continue;
         }
         match &ev.logical_key {
+            // Alt+Enter is the desktop fullscreen toggle, not an apply.
+            Key::Enter if alt => {}
             Key::Character(c) => {
                 let c = c.as_str();
                 if let Some((_, buf)) = editing.0.as_mut()
@@ -3594,6 +3634,7 @@ fn type_code(
         KeyCode::SuperLeft,
         KeyCode::SuperRight,
     ]);
+    let alt = crate::settings::alt_held(&key_state);
     let mut changed = false;
     for ev in keys.read() {
         if !ev.state.is_pressed() {
@@ -3601,6 +3642,8 @@ fn type_code(
         }
         match &ev.logical_key {
             Key::Character(_) if modifier => {}
+            // Alt+Enter is the desktop fullscreen toggle, not a join.
+            Key::Enter if alt => {}
             Key::Character(c) => {
                 let add = normalize_room_code(c.as_str());
                 if !add.is_empty() && typed.0.len() < ROOM_CODE_LEN {
@@ -3978,7 +4021,9 @@ fn connecting_keys(
             .as_ref()
             .is_some_and(|f| !matches!(f, RoomFailure::Checking))
     });
-    let ok = errored && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space));
+    // Alt+Enter is the desktop fullscreen toggle, not OK.
+    let enter = keys.just_pressed(KeyCode::Enter) && !crate::settings::alt_held(&keys);
+    let ok = errored && (enter || keys.just_pressed(KeyCode::Space));
     if keys.just_pressed(KeyCode::Escape) || ok {
         if errored {
             typed.0.clear();

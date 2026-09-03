@@ -34,6 +34,8 @@ pub struct Arena {
     pub spawns: Vec<Spawn>,
     /// Height of the painted "airshot line" above the floor (visual + scoring reference).
     pub airshot_line_height: f32,
+    /// The point fresh spawns look at (see `centre`).
+    pub look_at: Vec3,
 }
 
 /// Height of the ceiling above the floor. Rockets fired upwards explode on it instead of living
@@ -88,6 +90,28 @@ impl Arena {
             rocket_brushes,
             spawns,
             airshot_line_height: MGE_ENDIF_AIRSHOT_HEIGHT,
+            look_at: Vec3::ZERO,
+        }
+    }
+
+    /// The Fruit Ninja gallery: a small glass platform over a void (no walls, no ceiling), one
+    /// spawn in its middle facing +x, where the wooden wall stands. The wall is not part of the
+    /// arena: its distance is an option, so `SimState::step` adds it every tick
+    /// (`fruit::world_with_wall`). Falling off is death (`fruit::FALL_DEATH_Z`).
+    pub fn fruit_ninja() -> Arena {
+        let h = crate::fruit::PLATFORM_HALF;
+        let platform = Aabb::new(Vec3::new(-h, -h, -crate::fruit::PLATFORM_THICKNESS), Vec3::new(h, h, 0.0));
+        Arena {
+            name: "Fruit Ninja".to_string(),
+            half_size: h,
+            outer_half_size: h,
+            ceiling: CEILING_HEIGHT,
+            brushes: vec![platform],
+            rocket_brushes: vec![platform],
+            spawns: vec![Spawn { origin: Vec3::ZERO, angles: QAngle::new(0.0, 0.0, 0.0) }],
+            airshot_line_height: MGE_ENDIF_AIRSHOT_HEIGHT,
+            // Level with the eyes, far off along +x: the spawn looks straight at the wall.
+            look_at: Vec3::new(1e5, 0.0, SOLDIER_VIEW.z),
         }
     }
 
@@ -95,8 +119,8 @@ impl Arena {
         0.0
     }
 
-    /// The point on the floor in the middle of the arena; fresh spawns look at it.
+    /// The point fresh spawns look at: the middle of the floor in the classic arena.
     pub fn centre(&self) -> Vec3 {
-        Vec3::new(0.0, 0.0, self.floor_z())
+        self.look_at
     }
 }

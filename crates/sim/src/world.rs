@@ -2,6 +2,7 @@
 
 use crate::arena::{Arena, Spawn};
 use crate::consts::*;
+use crate::fruit::{self, FruitState};
 use crate::input::*;
 use crate::math::*;
 use crate::movement::run_player_move;
@@ -19,7 +20,8 @@ pub const NUM_PLAYERS: usize = 2;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SimEvent {
     RocketFired { shooter: u8, rocket_id: u32, origin: Vec3, velocity: Vec3, weapon: Weapon },
-    Explosion { rocket_id: u32, origin: Vec3, normal: Vec3, hit_player: Option<u8>, weapon: Weapon },
+    /// `hit_player` / `hit_target` name what the rocket flew into, if not the world.
+    Explosion { rocket_id: u32, origin: Vec3, normal: Vec3, hit_player: Option<u8>, hit_target: Option<u32>, weapon: Weapon },
     /// `height` is the victim's height above the ground below; `distance` is how far the rocket
     /// flew from the muzzle to the explosion. `chain` is the attacker's kill chain after the hit:
     /// 0 when it did not kill, 1 for a plain kill, 2 or more when the victim was killed before
@@ -30,6 +32,13 @@ pub enum SimEvent {
     RoundWon { winner: u8, score: [i32; 2] },
     Landed { player: u8, fall_velocity: f32 },
     Jumped { player: u8 },
+    /// Fruit Ninja: an explosion reached a soldier; `direct` when the rocket flew into it (the
+    /// hit that counts), false for a splash that only pushed it.
+    TargetHit { id: u32, origin: Vec3, direct: bool },
+    /// Fruit Ninja: the chain of soldiers hit in a row reached a multiple of `fruit::CHAIN_STEP`.
+    Chain { chain: u32 },
+    /// Fruit Ninja rounds: the last of the round's soldiers is gone.
+    RoundOver { hits: u32, shots: u32, best_chain: u32 },
 }
 
 /// Phase of the arena.
@@ -51,6 +60,8 @@ pub struct SimState {
     pub phase: Phase,
     /// Number of completed rounds (frag limit reached).
     pub rounds_played: u32,
+    /// The Fruit Ninja gallery (idle, empty and cheap when `Rules::fruit_ninja` is off).
+    pub fruit: FruitState,
     #[serde(skip)]
     pub events: Vec<SimEvent>,
 }
@@ -67,6 +78,7 @@ impl Hash for SimState {
         self.rules.hash(state);
         self.phase.hash(state);
         self.rounds_played.hash(state);
+        self.fruit.hash(state);
     }
 }
 
@@ -91,6 +103,7 @@ impl SimState {
             rules,
             phase: Phase::Warmup,
             rounds_played: 0,
+            fruit: FruitState::default(),
             events: Vec::new(),
         }
     }
@@ -210,13 +223,13 @@ impl SimState {
         self.events.push(SimEvent::Respawn { player: idx as u8, origin });
     }
 
-    fn kill(&mut self, victim: usize, attacker: usize, arena: &Arena) {
+    fn kill(&mut self, victim: usize, attacker: usize) {
         if !self.players[victim].alive {
             return;
         }
         self.players[victim].alive = false;
         self.players[victim].respawn_tick = self.tick + self.rules.respawn_delay_ticks;
-        self.players[victim].respawn_high = true;
+        self.players[victim].respawn_high = self.rules.respawn_height > 0;
         self.players[victim].pending_boosts.clear();
         self.players[victim].chain = 0;
         self.events.push(SimEvent::Killed { victim: victim as u8, attacker: attacker as u8 });
@@ -244,7 +257,6 @@ impl SimState {
                 self.players[attacker].respawn_high = false;
                 self.players[victim].respawn_tick = reset_tick;
                 self.players[victim].respawn_high = false;
-                let _ = arena;
             }
         }
     }
@@ -256,10 +268,16 @@ impl SimState {
     pub fn begin(&mut self, arena: &Arena) {
         if self.phase == Phase::Warmup {
             self.phase = Phase::Fighting;
-            for i in 0..NUM_PLAYERS {
+            for i in 0..self.player_count() {
                 self.respawn(arena, i);
             }
         }
+    }
+
+    /// Players that take part: both in a match, only the first in the Fruit Ninja gallery (the
+    /// second slot stays dead and its input carries the gallery's options).
+    fn player_count(&self) -> usize {
+        if self.rules.fruit_ninja { 1 } else { NUM_PLAYERS }
     }
 
     /// Advance the simulation by one tick using the given inputs.
@@ -271,8 +289,25 @@ impl SimState {
         // First tick: spawn everyone.
         self.begin(arena);
 
+        // Fruit Ninja: the options ride in the idle player's input; the soldiers fly, leave and
+        // spawn before anything can hit them this tick. The wall stands where the options put
+        // it, so the worlds the players and rockets collide with are built here every tick.
+        let mut fruit_player_world = Vec::new();
+        let mut fruit_rocket_world = Vec::new();
+        if self.rules.fruit_ninja {
+            self.fruit.apply_input(&inputs[1], tick);
+            let mut rng = self.rng;
+            self.fruit.think(tick, &mut rng, &mut self.events);
+            self.rng = rng;
+            let p = self.fruit.settings.preset();
+            fruit_player_world = fruit::world_with_wall(&arena.brushes, &p);
+            fruit_rocket_world = fruit::world_with_wall(&arena.rocket_brushes, &p);
+        }
+        let player_brushes: &[Aabb] = if self.rules.fruit_ninja { &fruit_player_world } else { &arena.brushes };
+        let rocket_brushes: &[Aabb] = if self.rules.fruit_ninja { &fruit_rocket_world } else { &arena.rocket_brushes };
+
         // Respawns.
-        for i in 0..NUM_PLAYERS {
+        for i in 0..self.player_count() {
             if !self.players[i].alive && self.players[i].respawn_tick <= tick {
                 self.respawn(arena, i);
             }
@@ -314,7 +349,7 @@ impl SimState {
             }
             let input = inputs[i];
             let solid = self.solid_players_for(i);
-            let env = TraceEnv { world: &arena.brushes, players: &solid };
+            let env = TraceEnv::with_players(player_brushes, &solid);
 
             let was_on_ground = self.players[i].ground.is_some();
             let was_jumping = self.players[i].jumping;
@@ -331,17 +366,23 @@ impl SimState {
                 self.events.push(SimEvent::Jumped { player: i as u8 });
             }
 
-            self.weapon_think(i, &input, arena);
+            // Fruit Ninja: off the platform is a long way down.
+            if self.rules.fruit_ninja && self.players[i].origin.z < fruit::FALL_DEATH_Z {
+                self.kill(i, i);
+                continue;
+            }
+
+            self.weapon_think(i, &input, rocket_brushes);
         }
 
         // Rockets (including the ones fired this tick).
-        self.move_rockets(arena);
+        self.move_rockets(rocket_brushes);
 
         self.tick += 1;
     }
 
     /// `CTFWeaponBaseGun::ItemPostFrame` / `PrimaryAttack` with the MGE infinite-ammo crutch.
-    fn weapon_think(&mut self, idx: usize, input: &PlayerInput, arena: &Arena) {
+    fn weapon_think(&mut self, idx: usize, input: &PlayerInput, rocket_brushes: &[Aabb]) {
         let curtime = self.curtime();
         let tick = self.tick;
 
@@ -363,10 +404,14 @@ impl SimState {
 
         // Rockets live in the rocket world (outer walls), so aim and spawn against that.
         let solid = self.solid_players_for(idx);
+        let targets = self.fruit.solid_targets();
         let ctx = FireContext {
-            env_all: TraceEnv { world: &arena.rocket_brushes, players: &solid },
-            env_world: TraceEnv::world_only(&arena.rocket_brushes),
+            env_all: TraceEnv { world: rocket_brushes, players: &solid, targets: &targets },
+            env_world: TraceEnv::world_only(rocket_brushes),
         };
+        if self.rules.fruit_ninja {
+            self.fruit.shots += 1;
+        }
         let id = self.next_rocket_id;
         self.next_rocket_id += 1;
         let rocket = fire_rocket(&self.players[idx], idx as u8, id, tick, &ctx);
@@ -385,8 +430,9 @@ impl SimState {
     }
 
     /// `CBaseEntity::PhysicsToss` for each rocket, exploding on contact.
-    fn move_rockets(&mut self, arena: &Arena) {
+    fn move_rockets(&mut self, rocket_brushes: &[Aabb]) {
         let tick = self.tick;
+        let targets = self.fruit.solid_targets();
         let mut i = 0;
         while i < self.rockets.len() {
             let r = self.rockets[i];
@@ -400,16 +446,17 @@ impl SimState {
 
             // Rockets pass through the player-collision walls and explode on the outer walls.
             let solid = self.solid_players_for(owner);
-            let env = TraceEnv { world: &arena.rocket_brushes, players: &solid };
+            let env = TraceEnv { world: rocket_brushes, players: &solid, targets: &targets };
             let end = r.origin + r.velocity * TICK_INTERVAL;
             let tr = trace_line(&env, r.origin, end);
 
             if tr.fraction < 1.0 || tr.startsolid {
-                let hit_player = match tr.ent {
-                    Some(HitEnt::Player(p)) => Some(p as usize),
-                    _ => None,
+                let (hit_player, hit_target) = match tr.ent {
+                    Some(HitEnt::Player(p)) => (Some(p as usize), None),
+                    Some(HitEnt::Target(id)) => (None, Some(id)),
+                    _ => (None, None),
                 };
-                self.explode(i, tr, hit_player, arena);
+                self.explode(i, tr, hit_player, hit_target, rocket_brushes);
                 // explode removed the rocket; do not advance.
                 continue;
             }
@@ -420,7 +467,7 @@ impl SimState {
     }
 
     /// `CTFBaseRocket::Explode` + `CTFGameRules::RadiusDamage`.
-    fn explode(&mut self, rocket_index: usize, tr: Trace, hit_player: Option<usize>, arena: &Arena) {
+    fn explode(&mut self, rocket_index: usize, tr: Trace, hit_player: Option<usize>, hit_target: Option<u32>, rocket_brushes: &[Aabb]) {
         let rocket = self.rockets.swap_remove(rocket_index);
         let attacker = rocket.owner as usize;
 
@@ -433,16 +480,24 @@ impl SimState {
             origin: src,
             normal: tr.normal,
             hit_player: hit_player.map(|p| p as u8),
+            hit_target,
             weapon: rocket.weapon,
         });
 
         // Blast line of sight must not be blocked by the invisible player walls.
-        let env_world = TraceEnv::world_only(&arena.rocket_brushes);
+        let env_world = TraceEnv::world_only(rocket_brushes);
         let attacker_snapshot = self.players[attacker].clone();
+
+        // Fruit Ninja soldiers within reach are pushed (and the one hit is counted).
+        if self.rules.fruit_ninja {
+            let mut rng = self.rng;
+            self.fruit.explode(src, hit_target, &attacker_snapshot, &env_world, &self.rules, &mut rng, &mut self.events);
+            self.rng = rng;
+        }
 
         // Everyone except the attacker, within TF_ROCKET_RADIUS.
         let mut hits: Vec<HitResult> = Vec::new();
-        for v in 0..NUM_PLAYERS {
+        for v in 0..self.player_count() {
             if v == attacker {
                 continue;
             }
@@ -503,11 +558,11 @@ impl SimState {
             if h.airshot_kill {
                 self.players[v].airshots += 0; // victim stat unchanged
                 self.players[attacker].airshots += 1;
-                self.kill(v, attacker, arena);
+                self.kill(v, attacker);
                 killed = true;
             } else if self.players[v].health <= 0 {
                 // Lethal raw damage (cannot happen without crits, kept for completeness).
-                self.kill(v, attacker, arena);
+                self.kill(v, attacker);
                 killed = true;
             } else {
                 // Every non-lethal hit heals to full in endif.

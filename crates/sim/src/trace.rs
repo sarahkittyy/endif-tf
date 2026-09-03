@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub enum HitEnt {
     World,
     Player(u8),
+    /// A Fruit Ninja soldier, by id (see `fruit::Target`).
+    Target(u32),
 }
 
 /// An axis-aligned box in world space.
@@ -95,11 +97,17 @@ pub struct TraceEnv<'a> {
     pub world: &'a [Aabb],
     /// Other solid players as `(player index, absolute hull)`.
     pub players: &'a [(u8, Aabb)],
+    /// Fruit Ninja soldiers as `(target id, absolute hull)`; only rockets see them.
+    pub targets: &'a [(u32, Aabb)],
 }
 
 impl<'a> TraceEnv<'a> {
     pub fn world_only(world: &'a [Aabb]) -> Self {
-        TraceEnv { world, players: &[] }
+        TraceEnv { world, players: &[], targets: &[] }
+    }
+
+    pub fn with_players(world: &'a [Aabb], players: &'a [(u8, Aabb)]) -> Self {
+        TraceEnv { world, players, targets: &[] }
     }
 }
 
@@ -212,6 +220,14 @@ pub fn trace_hull(env: &TraceEnv, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3
     if !tr.allsolid {
         for (idx, b) in env.players {
             clip_box_to_brush(b, HitEnt::Player(*idx), mins, maxs, start, end, &mut tr);
+            if tr.allsolid {
+                break;
+            }
+        }
+    }
+    if !tr.allsolid {
+        for (id, b) in env.targets {
+            clip_box_to_brush(b, HitEnt::Target(*id), mins, maxs, start, end, &mut tr);
             if tr.allsolid {
                 break;
             }

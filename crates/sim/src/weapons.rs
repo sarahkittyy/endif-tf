@@ -63,6 +63,9 @@ pub struct Rules {
     /// Apply the launcher preference every tick instead of at spawn only. For offline practice,
     /// where nobody dies and a switch would otherwise never take effect.
     pub instant_weapon_switch: bool,
+    /// The Fruit Ninja gallery (see `crate::fruit`): only the first player exists, the second
+    /// slot's input carries the options, soldiers fly across the view and falling off is death.
+    pub fruit_ninja: bool,
 }
 
 impl Default for Rules {
@@ -76,6 +79,7 @@ impl Default for Rules {
             respawn_height: 768,
             respawn_fling_deg: (25, 35),
             instant_weapon_switch: false,
+            fruit_ninja: false,
         }
     }
 }

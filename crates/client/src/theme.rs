@@ -35,6 +35,8 @@ pub struct Theme {
     pub build: Handle<Font>,
     /// TF2 Secondary: body text.
     pub secondary: Handle<Font>,
+    /// DejaVu Sans Bold cut down to the symbols the TF2 fonts lack (the infinity sign).
+    pub symbols: Handle<Font>,
     /// Soldier class icon.
     pub soldier: Handle<Image>,
     /// Title screen background.
@@ -58,6 +60,7 @@ impl FromWorld for Theme {
         Theme {
             build: assets.load("fonts/TF2Build.ttf"),
             secondary: assets.load("fonts/TF2Secondary.ttf"),
+            symbols: assets.load("fonts/DejaVuSansBold-symbols.ttf"),
             soldier: assets.load("ui/soldier.png"),
             menu_bg: assets.load("ui/menu_bg.png"),
             tab_on: assets.load("ui/tab_on.png"),
@@ -110,6 +113,11 @@ impl Theme {
     /// TF2 Secondary body text.
     pub fn label(&self, s: impl Into<String>, size: f32, color: Color) -> impl Bundle {
         (Text::new(s), self.body_font(size), TextColor(color))
+    }
+
+    /// A symbol the TF2 fonts have no glyph for, with a heading's drop shadow.
+    pub fn symbol(&self, s: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+        (Text::new(s), TextFont { font: self.symbols.clone().into(), font_size: FontSize::Px(size), ..default() }, TextColor(color), shadow())
     }
 
     /// Econ-style button. The label is upper-cased like every TF2 menu button.
