@@ -96,13 +96,15 @@ impl Countdown {
     }
 }
 
-/// The best round on each difficulty: soldiers hit and the longest chain, kept locally.
+/// The best round on each difficulty: soldiers hit, accuracy and the longest chain, kept locally.
 #[derive(Resource, Default)]
 struct Records([Record; 3]);
 
 #[derive(Clone, Copy, Default)]
 struct Record {
     hits: u32,
+    /// Percent.
+    acc: u32,
     chain: u32,
 }
 
@@ -111,11 +113,12 @@ impl Records {
         self.0[d as usize]
     }
 
-    /// Takes a round's result in; true when it beat either record.
-    fn submit(&mut self, d: Difficulty, hits: u32, chain: u32) -> bool {
+    /// Takes a round's result in; true when it beat any of the records.
+    fn submit(&mut self, d: Difficulty, hits: u32, acc: u32, chain: u32) -> bool {
         let r = &mut self.0[d as usize];
-        let better = hits > r.hits || chain > r.chain;
+        let better = hits > r.hits || acc > r.acc || chain > r.chain;
         r.hits = r.hits.max(hits);
+        r.acc = r.acc.max(acc);
         r.chain = r.chain.max(chain);
         better
     }
@@ -128,6 +131,7 @@ impl Records {
             let Some(d) = Difficulty::from_ini(name) else { continue };
             match what {
                 "hits" => records.0[d as usize].hits = n,
+                "acc" => records.0[d as usize].acc = n,
                 "chain" => records.0[d as usize].chain = n,
                 _ => {}
             }
@@ -139,7 +143,8 @@ impl Records {
         let mut out = String::from("; endif.tf Fruit Ninja records\n");
         for d in Difficulty::ALL {
             let r = self.get(d);
-            out.push_str(&format!("{}_hits = {}\n{}_chain = {}\n", d.ini_name(), r.hits, d.ini_name(), r.chain));
+            let name = d.ini_name();
+            out.push_str(&format!("{name}_hits = {}\n{name}_acc = {}\n{name}_chain = {}\n", r.hits, r.acc, r.chain));
         }
         if let Err(e) = storage::write(RECORDS_FILE, &out) {
             warn!("could not save the Fruit Ninja records: {e}");
@@ -233,6 +238,8 @@ struct ProgressLabel;
 /// The records on the current difficulty (rounds only).
 #[derive(Component)]
 struct RecordHitsText;
+#[derive(Component)]
+struct RecordAccText;
 #[derive(Component)]
 struct RecordChainText;
 /// A score strip element for one mode only: shown in rounds (true) or in endless play (false).
@@ -534,6 +541,7 @@ fn spawn_score(commands: &mut Commands, theme: &Theme, rounds: bool) {
                     });
                 // The records on the difficulty being played.
                 stat(r, theme, RecordHitsText, "0", "BEST HITS", theme::ORANGE, ());
+                stat(r, theme, RecordAccText, "0%", "BEST ACC", theme::ORANGE, ());
                 stat(r, theme, RecordChainText, "0", "BEST CHAIN", theme::ORANGE, ());
                 r.spawn(theme.button("reset", ResetButton, 92.0, 34.0, 14.0));
             });
@@ -812,18 +820,16 @@ fn round_result(
     for ev in &fx.events {
         if let SimEvent::RoundOver { hits, shots, best_chain } = *ev {
             let difficulty = states.cur.fruit.settings.difficulty;
-            let record = records.submit(difficulty, hits, best_chain);
+            let accuracy = (hits * 100 + shots / 2).checked_div(shots).unwrap_or(0);
+            let record = records.submit(difficulty, hits, accuracy, best_chain);
             if record {
                 records.save();
                 play(&mut commands, &sfx.record, 0.8);
             }
             let best = records.get(difficulty);
-            let accuracy = (hits * 100 + shots / 2).checked_div(shots).unwrap_or(0);
             if let Ok(mut t) = text.single_mut() {
                 let title = if record { "NEW RECORD!\n" } else { "" };
-                t.0 = format!("{title}{hits} hit (best {})
-{accuracy}% acc
-{best_chain} chain (best {})", best.hits, best.chain);
+                t.0 = format!("{title}{hits} hit (best {})\n{accuracy}% acc (best {}%)\n{best_chain} chain (best {})", best.hits, best.acc, best.chain);
             }
             if !countdown.active() {
                 countdown.start(time.elapsed_secs_f64() + if record { RECORD_RESULT_SECS } else { RESULT_SECS });
@@ -874,6 +880,7 @@ fn update_score(
         Query<&mut Text, With<ChainText>>,
         Query<&mut Text, With<ProgressText>>,
         Query<&mut Text, With<RecordHitsText>>,
+        Query<&mut Text, With<RecordAccText>>,
         Query<&mut Text, With<RecordChainText>>,
     )>,
     mut marks: Query<(&mut Node, &ModeOnly)>,
@@ -882,7 +889,7 @@ fn update_score(
     let f = &states.cur.fruit;
     let rounds = f.settings.rounds;
     let best = records.get(f.settings.difficulty);
-    let wanted = [f.hits.to_string(), format!("{}%", f.accuracy()), f.chain.to_string(), progress_text(rounds, f.thrown).0, best.hits.to_string(), best.chain.to_string()];
+    let wanted = [f.hits.to_string(), format!("{}%", f.accuracy()), f.chain.to_string(), progress_text(rounds, f.thrown).0, best.hits.to_string(), format!("{}%", best.acc), best.chain.to_string()];
     let set = |text: Option<Mut<Text>>, want: &str| {
         if let Some(mut t) = text
             && t.0 != want
@@ -896,6 +903,7 @@ fn update_score(
     set(texts.p3().single_mut().ok(), &wanted[3]);
     set(texts.p4().single_mut().ok(), &wanted[4]);
     set(texts.p5().single_mut().ok(), &wanted[5]);
+    set(texts.p6().single_mut().ok(), &wanted[6]);
     // The progress number and the records in rounds, the infinity in endless play.
     for (mut node, only) in &mut marks {
         let want = shown(only.0 == rounds);
