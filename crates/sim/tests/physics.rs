@@ -46,6 +46,17 @@ fn spawns_land_on_floor() {
 }
 
 #[test]
+fn spawns_look_at_the_arena_centre() {
+    let (arena, sim) = fresh();
+    for p in &sim.players {
+        let (forward, _, _) = endif_sim::math::angle_vectors(p.spawn_angles);
+        let to_centre = (arena.centre() - p.eye_position()).normalized();
+        assert!(forward.dot(to_centre) > 0.999, "spawn at {:?} looks {:?}, centre is {:?}", p.origin, forward, to_centre);
+        assert!(p.spawn_angles.pitch > 0.0 && p.spawn_angles.pitch < MAX_PITCH, "pitch = {}", p.spawn_angles.pitch);
+    }
+}
+
+#[test]
 fn ground_speed_caps_at_240() {
     let (arena, mut sim) = fresh();
     place(&mut sim, 0, Vec3::new(-300.0, 0.0, 0.0), 0.0);
@@ -449,4 +460,80 @@ fn kills_before_the_victim_lands_from_respawn_chain() {
     }
     assert_eq!(fire_at_victim(&mut sim, &arena), Some(1), "kill after landing");
     assert_eq!(sim.players[1].chain, 1);
+}
+
+/// Where player 1's rocket starts when they fire straight ahead at yaw 0 after spawning with the
+/// given launcher preference bits, relative to the eye (Source axes: x forward, -y to the right).
+fn muzzle_offset(weapon_bits: u32) -> (Vec3, Weapon) {
+    let arena = Arena::classic_square();
+    let mut sim = SimState::new(1234, Rules::default());
+    let input = with(weapon_bits, 0.0, 0.0);
+    sim.step(&arena, [idle(0.0), input]);
+    place(&mut sim, 0, Vec3::new(-300.0, 0.0, 0.0), 0.0);
+    place(&mut sim, 1, Vec3::ZERO, 0.0);
+    while sim.curtime() < sim.players[1].next_primary_attack {
+        sim.step(&arena, [idle(0.0), input]);
+    }
+    let eye = sim.players[1].eye_position();
+    sim.step(&arena, [idle(0.0), with(weapon_bits | IN_ATTACK, 0.0, 0.0)]);
+    sim.events
+        .iter()
+        .find_map(|e| match e {
+            SimEvent::RocketFired { shooter: 1, origin, weapon, .. } => Some((*origin - eye, *weapon)),
+            _ => None,
+        })
+        .expect("rocket should fire")
+}
+
+#[test]
+fn the_original_fires_from_the_middle() {
+    // `FireRocket`: 23.5 forward, 12 to the right and 3 below the eye; The Original's
+    // `centerfire_projectile` drops the sideways part.
+    let (stock, weapon) = muzzle_offset(0);
+    assert_eq!(weapon, Weapon::Stock);
+    assert!((stock - Vec3::new(23.5, -12.0, -3.0)).length() < 0.01, "stock muzzle {stock:?}");
+    let (original, weapon) = muzzle_offset(IN_WEAPON_ORIGINAL);
+    assert_eq!(weapon, Weapon::Original);
+    assert!((original - Vec3::new(23.5, 0.0, -3.0)).length() < 0.01, "original muzzle {original:?}");
+}
+
+#[test]
+fn launcher_choice_waits_for_the_next_spawn() {
+    let (arena, mut sim) = fresh();
+    assert_eq!(sim.players[0].weapon, Weapon::Stock);
+    // Asking for The Original mid-life changes nothing...
+    for _ in 0..10 {
+        sim.step(&arena, [with(IN_WEAPON_ORIGINAL, 0.0, 0.0), idle(0.0)]);
+    }
+    assert_eq!(sim.players[0].weapon, Weapon::Stock);
+    // ...until the player dies and comes back.
+    sim.players[0].alive = false;
+    sim.players[0].respawn_tick = sim.tick;
+    sim.step(&arena, [with(IN_WEAPON_ORIGINAL, 0.0, 0.0), idle(0.0)]);
+    assert!(sim.players[0].alive);
+    assert_eq!(sim.players[0].weapon, Weapon::Original);
+    // And going back to stock waits the same way.
+    for _ in 0..10 {
+        sim.step(&arena, [idle(0.0), idle(0.0)]);
+    }
+    assert_eq!(sim.players[0].weapon, Weapon::Original);
+    // Both players were spawned by `begin` before any input existed: the first stepped tick
+    // decides for them too.
+    let mut sim = SimState::new(7, Rules::default());
+    sim.begin(&arena);
+    assert!(sim.players[1].alive && sim.players[1].weapon_pending);
+    sim.step(&arena, [idle(0.0), with(IN_WEAPON_ORIGINAL, 0.0, 0.0)]);
+    assert_eq!((sim.players[0].weapon, sim.players[1].weapon), (Weapon::Stock, Weapon::Original));
+}
+
+#[test]
+fn practice_switches_launchers_at_once() {
+    let arena = Arena::classic_square();
+    let mut sim = SimState::new(1234, Rules { instant_weapon_switch: true, ..Rules::default() });
+    sim.step(&arena, [idle(0.0), idle(0.0)]);
+    assert_eq!(sim.players[0].weapon, Weapon::Stock);
+    sim.step(&arena, [with(IN_WEAPON_ORIGINAL, 0.0, 0.0), idle(0.0)]);
+    assert_eq!(sim.players[0].weapon, Weapon::Original);
+    sim.step(&arena, [idle(0.0), idle(0.0)]);
+    assert_eq!(sim.players[0].weapon, Weapon::Stock);
 }

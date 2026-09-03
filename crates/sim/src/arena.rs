@@ -94,4 +94,9 @@ impl Arena {
     pub fn floor_z(&self) -> f32 {
         0.0
     }
+
+    /// The point on the floor in the middle of the arena; fresh spawns look at it.
+    pub fn centre(&self) -> Vec3 {
+        Vec3::new(0.0, 0.0, self.floor_z())
+    }
 }

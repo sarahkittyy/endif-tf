@@ -142,6 +142,15 @@ struct SoldierPose {
     ik: Option<IkChain>,
 }
 
+/// The mesh nodes of the two launchers in `soldier.glb`, in `Weapon` order: `w_rocketlauncher`
+/// and `c_bet_rocketlauncher` (The Original is a c_model, so it is its own world model).
+const LAUNCHER_NODES: [&str; 2] = ["w_rocketlauncher", "c_bet_rocketlauncher"];
+
+/// The launcher nodes of one spawned soldier, in `Weapon` order; `sync_launcher_models` shows the
+/// one the player holds and hides the other.
+#[derive(Component)]
+struct LauncherNodes([Option<Entity>; 2]);
+
 pub struct PlayerModelPlugin;
 
 impl Plugin for PlayerModelPlugin {
@@ -149,7 +158,7 @@ impl Plugin for PlayerModelPlugin {
         app.init_resource::<SoldierGraph>()
             .init_resource::<AimData>()
             .add_systems(OnEnter(AppState::InGame), spawn_player_models)
-            .add_systems(Update, drive_soldier_anims.run_if(in_state(AppState::InGame)))
+            .add_systems(Update, (drive_soldier_anims, sync_launcher_models).run_if(in_state(AppState::InGame)))
             .add_systems(
                 PostUpdate,
                 apply_soldier_pose.after(AnimationSystems).before(TransformSystems::Propagate).run_if(in_state(AppState::InGame)),
@@ -314,9 +323,30 @@ fn on_soldier_ready(
             }
         }
     }
+    let launchers = LAUNCHER_NODES.map(|n| by_name.get(n).copied());
+    if launchers.iter().any(|l| l.is_none()) {
+        warn!("soldier.glb: launcher nodes {LAUNCHER_NODES:?} not all found, both launchers may show");
+    }
     for e in children.iter_descendants(root) {
         if players.contains(e) {
-            commands.entity(e).insert(resolve_pose(&aim.0, &by_name, e));
+            commands.entity(e).insert((resolve_pose(&aim.0, &by_name, e), LauncherNodes(launchers)));
+        }
+    }
+}
+
+/// Shows the launcher each player holds (`Player::weapon`, fixed for the life) and hides the other.
+fn sync_launcher_models(states: Option<Res<RenderStates>>, q: Query<(&SoldierAnim, &LauncherNodes)>, mut visibility: Query<&mut Visibility>) {
+    let Some(states) = states else { return };
+    for (anim, nodes) in &q {
+        let held = states.cur.players[anim.player as usize].weapon as usize;
+        for (i, e) in nodes.0.iter().enumerate() {
+            let target = if i == held { Visibility::Inherited } else { Visibility::Hidden };
+            if let Some(e) = e
+                && let Ok(mut v) = visibility.get_mut(*e)
+                && *v != target
+            {
+                *v = target;
+            }
         }
     }
 }

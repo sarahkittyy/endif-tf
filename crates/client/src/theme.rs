@@ -46,6 +46,10 @@ pub struct Theme {
     /// The TF2 logo glyph (the menu tab) and the winged UGC trophy (the leaderboard tab).
     pub tf2_logo: Handle<Image>,
     pub trophy: Handle<Image>,
+    /// Backpack pictures of the stock rocket launcher and The Original (the launcher switch in
+    /// the settings).
+    pub launcher_stock: Handle<Image>,
+    pub launcher_original: Handle<Image>,
 }
 
 impl FromWorld for Theme {
@@ -60,6 +64,8 @@ impl FromWorld for Theme {
             tab_off: assets.load("ui/tab_off.png"),
             tf2_logo: assets.load("ui/tf2_logo.png"),
             trophy: assets.load("ui/trophy.png"),
+            launcher_stock: assets.load("ui/launcher_stock.png"),
+            launcher_original: assets.load("ui/launcher_original.png"),
         }
     }
 }

@@ -132,9 +132,18 @@ fn setup_scene(
         Transform::from_xyz(0.0, wall_h + 0.15, 0.0),
     ));
 
-    let wall_mat = materials.add(StandardMaterial {
+    // Bevy's cuboid lays UVs out with u along the height on its ±X faces (and along the width on
+    // its ±Z faces), so the two pairs of walls need the texture axes the other way round.
+    let wall_scale = Vec2::new(span / 256.0, (wall_h / UNIT) / 512.0);
+    let wall_mat_z = materials.add(StandardMaterial {
         base_color_texture: Some(assets.wall.clone()),
-        uv_transform: Affine2::from_scale(Vec2::new(span / 256.0, (wall_h / UNIT) / 512.0)),
+        uv_transform: Affine2::from_scale(wall_scale),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let wall_mat_x = materials.add(StandardMaterial {
+        base_color_texture: Some(assets.wall.clone()),
+        uv_transform: Affine2::from_mat2(Mat2::from_cols(Vec2::new(0.0, wall_scale.y), Vec2::new(wall_scale.x, 0.0))),
         perceptual_roughness: 0.95,
         ..default()
     });
@@ -154,6 +163,7 @@ fn setup_scene(
         (Vec3::new(0.0, wall_h / 2.0, -h - thickness / 2.0), Vec3::new(h * 2.0, wall_h, thickness)),
     ];
     for (pos, size) in wall_specs {
+        let wall_mat = if size.x > size.z { &wall_mat_z } else { &wall_mat_x };
         commands.spawn((
             GameEntity,
             Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),

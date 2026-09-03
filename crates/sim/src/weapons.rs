@@ -22,6 +22,8 @@ pub struct Rocket {
     pub spawn_tick: u32,
     /// Where the rocket was fired from (for the "airshot from N units" readout).
     pub start: Vec3,
+    /// The launcher that fired it (its explosion sound differs; the rocket itself does not).
+    pub weapon: Weapon,
 }
 
 impl Hash for Rocket {
@@ -33,6 +35,7 @@ impl Hash for Rocket {
         self.angles.hash(state);
         self.spawn_tick.hash(state);
         self.start.hash(state);
+        self.weapon.hash(state);
     }
 }
 
@@ -57,6 +60,9 @@ pub struct Rules {
     /// The angle, in degrees off vertical, between the spawn point and where an untouched fall
     /// would land; drawn uniformly from this inclusive range with the simulation RNG.
     pub respawn_fling_deg: (u32, u32),
+    /// Apply the launcher preference every tick instead of at spawn only. For offline practice,
+    /// where nobody dies and a switch would otherwise never take effect.
+    pub instant_weapon_switch: bool,
 }
 
 impl Default for Rules {
@@ -69,6 +75,7 @@ impl Default for Rules {
             endif_boost: true,
             respawn_height: 768,
             respawn_fling_deg: (25, 35),
+            instant_weapon_switch: false,
         }
     }
 }
@@ -98,7 +105,11 @@ pub fn fire_rocket(shooter: &Player, shooter_idx: u8, id: u32, tick: u32, ctx: &
         offset.z = ROCKET_FIRE_OFFSET_Z_DUCKED;
     }
 
-    // GetProjectileFireSetup
+    // GetProjectileFireSetup. (A flipped viewmodel would negate y first; not supported here.)
+    // `centerfire_projectile`: The Original fires from the middle, not over the right shoulder.
+    if shooter.weapon == Weapon::Original {
+        offset.y = 0.0;
+    }
     let ang_spread = QAngle::new(shooter.view_angles.pitch, shooter.view_angles.yaw, 0.0);
     let (forward, right, up) = angle_vectors(ang_spread);
 
@@ -130,7 +141,7 @@ pub fn fire_rocket(shooter: &Player, shooter_idx: u8, id: u32, tick: u32, ctx: &
     let velocity = fwd2 * ROCKET_SPEED;
     let angles = vector_angles(velocity);
 
-    Rocket { id, owner: shooter_idx, origin, velocity, angles, spawn_tick: tick, start: origin }
+    Rocket { id, owner: shooter_idx, origin, velocity, angles, spawn_tick: tick, start: origin, weapon: shooter.weapon }
 }
 
 /// Outcome of one explosion, for the world to turn into events.

@@ -63,7 +63,7 @@ const KILL_HOLD_SECS: f64 = 2.0;
 const KILL_FADE_SECS: f64 = 0.5;
 const KILL_MAX_LINES: usize = 5;
 /// Every size in a line (row height, fonts, icon, gaps) is this many times the TF2 original.
-const KILL_SCALE: f32 = 2.0;
+const KILL_SCALE: f32 = 1.5;
 /// Chained kills hold this many times longer than a plain kill.
 const CHAIN_HOLD: f64 = 2.0;
 

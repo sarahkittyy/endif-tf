@@ -11,6 +11,25 @@ pub const FL_ONGROUND: u32 = 1 << 0;
 /// `FL_DUCKING`.
 pub const FL_DUCKING: u32 = 1 << 1;
 
+/// Which rocket launcher a player holds. The two are the same weapon in every number that
+/// matters (speed, damage, clip, fire rate); The Original (item 513) carries the
+/// `centerfire_projectile` attribute, so its rockets leave from the middle of the screen instead
+/// of over the right shoulder (`CTFWeaponBase::GetProjectileFireSetup`), and it has its own
+/// model, viewmodel animations and Quake sounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Weapon {
+    #[default]
+    Stock,
+    Original,
+}
+
+impl Weapon {
+    /// The launcher a player's input asks for (`IN_WEAPON_ORIGINAL`).
+    pub fn from_buttons(buttons: u32) -> Weapon {
+        if buttons & crate::input::IN_WEAPON_ORIGINAL != 0 { Weapon::Original } else { Weapon::Stock }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Player {
     // ---- transform / physics (CBasePlayer + CMoveData persisted parts) ----
@@ -21,6 +40,10 @@ pub struct Player {
     pub view_angles: QAngle,
     /// `m_vecViewOffset`: eye position relative to origin.
     pub view_offset: Vec3,
+    /// Angles the player was given at the last spawn, aimed at the arena's centre floor point. The
+    /// spawn tick's own input overwrites `view_angles` at once, so the client reads these (keyed
+    /// on `spawn_tick`) to point its live look angles that way when it sees a respawn.
+    pub spawn_angles: QAngle,
     pub ground: Option<HitEnt>,
     /// `FL_*` flags we care about.
     pub flags: u32,
@@ -59,6 +82,13 @@ pub struct Player {
     pub spawn_tick: u32,
 
     // ---- weapon ----
+    /// The launcher in hand. Picked from the player's input on the tick they spawn and kept for
+    /// the whole life, like a loadout change in TF2 that only takes effect at the next spawn
+    /// (every tick under `Rules::instant_weapon_switch`).
+    pub weapon: Weapon,
+    /// A fresh spawn that has not read its input yet (`SimState::begin` spawns before the first
+    /// input exists); `SimState::step` resolves it from that tick's input.
+    pub weapon_pending: bool,
     pub next_primary_attack: f32,
     pub clip: i32,
     /// Absolute time at which the infinite-ammo crutch refills the clip; negative when idle.
@@ -86,6 +116,7 @@ impl Hash for Player {
         self.base_velocity.hash(state);
         self.view_angles.hash(state);
         self.view_offset.hash(state);
+        self.spawn_angles.hash(state);
         self.ground.hash(state);
         self.flags.hash(state);
         self.ducked.hash(state);
@@ -109,6 +140,8 @@ impl Hash for Player {
         self.respawn_tick.hash(state);
         self.respawn_high.hash(state);
         self.spawn_tick.hash(state);
+        self.weapon.hash(state);
+        self.weapon_pending.hash(state);
         self.next_primary_attack.to_bits().hash(state);
         self.clip.hash(state);
         self.clip_refill_time.to_bits().hash(state);
@@ -128,6 +161,7 @@ impl Default for Player {
             base_velocity: Vec3::ZERO,
             view_angles: QAngle::default(),
             view_offset: SOLDIER_VIEW,
+            spawn_angles: QAngle::default(),
             ground: None,
             flags: 0,
             ducked: false,
@@ -151,6 +185,8 @@ impl Default for Player {
             respawn_tick: 0,
             respawn_high: false,
             spawn_tick: 0,
+            weapon: Weapon::Stock,
+            weapon_pending: true,
             next_primary_attack: 0.0,
             clip: ROCKET_CLIP_SIZE,
             clip_refill_time: -1.0,
@@ -201,7 +237,8 @@ impl Player {
         self.origin + self.view_offset
     }
 
-    /// Resets movement/weapon state for a fresh spawn at `origin` facing `angles`.
+    /// Resets movement/weapon state for a fresh spawn at `origin` facing `angles`. The launcher
+    /// is left `weapon_pending` for the caller to pick from the spawn tick's input.
     pub fn spawn(&mut self, origin: Vec3, angles: QAngle, tick: u32, curtime: f32) {
         let score = self.score;
         let airshots = self.airshots;
@@ -210,6 +247,7 @@ impl Player {
         self.airshots = airshots;
         self.origin = origin;
         self.view_angles = angles;
+        self.spawn_angles = angles;
         self.alive = true;
         self.spawn_tick = tick;
         self.game_code_moved = true;

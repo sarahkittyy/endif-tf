@@ -37,7 +37,7 @@ pub use checksum::DetHasher;
 pub use consts::*;
 pub use input::*;
 pub use math::{QAngle, Vec3};
-pub use player::{FL_DUCKING, FL_ONGROUND, Player};
+pub use player::{FL_DUCKING, FL_ONGROUND, Player, Weapon};
 pub use trace::{Aabb, HitEnt, Trace, TraceEnv};
 pub use weapons::{Rocket, Rules};
 pub use world::{NUM_PLAYERS, Phase, SimEvent, SimState};

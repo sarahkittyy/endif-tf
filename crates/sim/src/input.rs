@@ -13,6 +13,11 @@ pub const IN_BACK: u32 = 1 << 4;
 pub const IN_MOVELEFT: u32 = 1 << 9;
 pub const IN_MOVERIGHT: u32 = 1 << 10;
 pub const IN_RELOAD: u32 = 1 << 13;
+/// Not an `in_buttons.h` bit: the player's preferred rocket launcher rides along with the buttons
+/// (set: The Original, clear: the stock launcher). Source carries the loadout out of band; here
+/// the input stream is the only thing peers exchange, so the choice has to travel in it. It is
+/// read on the tick a player spawns (see `Player::weapon`) and ignored otherwise.
+pub const IN_WEAPON_ORIGINAL: u32 = 1 << 30;
 
 /// One tick of input for one player.
 #[repr(C)]

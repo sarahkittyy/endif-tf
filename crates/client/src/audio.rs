@@ -11,8 +11,8 @@ use crate::settings::Settings;
 use crate::AppState;
 use bevy::audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, GlobalVolume, PlaybackSettings, Volume};
 use bevy::prelude::*;
-use endif_sim::SimEvent;
 use endif_sim::Vec3 as SVec3;
+use endif_sim::{SimEvent, Weapon};
 
 type Clip = Handle<AudioSource>;
 
@@ -27,6 +27,11 @@ pub struct Sfx {
     pub rocket_shoot: Clip,
     pub rocket_reload: Clip,
     pub explode: Vec<Clip>,
+    /// The Original's `Weapon_QuakeRPG.Single` / `.Reload` / `.Explode` (its items_game entry
+    /// replaces all three; the explosion is the weapon's `sound_special1`).
+    pub original_shoot: Clip,
+    pub original_reload: Clip,
+    pub original_explode: Clip,
     pub crit_hit: Vec<Clip>,
     pub crit_received: Vec<Clip>,
     pub hitsound: Clip,
@@ -66,6 +71,9 @@ impl Sfx {
         let mut clips = vec![
             self.rocket_shoot.clone(),
             self.rocket_reload.clone(),
+            self.original_shoot.clone(),
+            self.original_reload.clone(),
+            self.original_explode.clone(),
             self.hitsound.clone(),
             self.killsound.clone(),
             self.killstreak.clone(),
@@ -107,6 +115,9 @@ impl FromWorld for Sfx {
             rocket_shoot: load("weapons/rocket_shoot"),
             rocket_reload: load("weapons/rocket_reload"),
             explode: set(&["weapons/explode1", "weapons/explode2", "weapons/explode3"]),
+            original_shoot: load("weapons/quake_rpg_fire"),
+            original_reload: load("weapons/quake_rpg_reload"),
+            original_explode: load("weapons/quake_explosion"),
             crit_hit: set(&["player/crit_hit", "player/crit_hit2", "player/crit_hit3"]),
             crit_received: set(&["player/crit_received1", "player/crit_received2", "player/crit_received3"]),
             hitsound: load("ui/hitsound"),
@@ -308,12 +319,20 @@ fn game_sounds(
     let now = time.elapsed_secs_f64();
     for ev in &fx.events {
         match ev {
-            SimEvent::RocketFired { shooter, origin, .. } => {
+            SimEvent::RocketFired { shooter, origin, weapon, .. } => {
                 let v = if *shooter == me { 0.55 } else { attenuate(*origin, my_pos, 0.55) };
-                play(&mut commands, &sfx.rocket_shoot, v);
+                let clip = match weapon {
+                    Weapon::Stock => &sfx.rocket_shoot,
+                    Weapon::Original => &sfx.original_shoot,
+                };
+                play(&mut commands, clip, v);
             }
-            SimEvent::Explosion { origin, .. } => {
-                play(&mut commands, pick(&sfx.explode), attenuate(*origin, my_pos, 0.8));
+            SimEvent::Explosion { origin, weapon, .. } => {
+                let clip = match weapon {
+                    Weapon::Stock => pick(&sfx.explode),
+                    Weapon::Original => &sfx.original_explode,
+                };
+                play(&mut commands, clip, attenuate(*origin, my_pos, 0.8));
             }
             SimEvent::PlayerHit { victim, attacker, airshot_kill, chain, .. } => {
                 // Chaining (a kill before the victim landed from their respawn): both players
@@ -371,7 +390,11 @@ fn reload_sound(mut commands: Commands, sfx: Res<Sfx>, local: Res<LocalHandle>, 
     let Some(states) = states else { return };
     let (a, b) = (&states.prev.players[local.0], &states.cur.players[local.0]);
     if a.alive && b.alive && a.spawn_tick == b.spawn_tick && b.clip > a.clip {
-        play(&mut commands, &sfx.rocket_reload, 0.6);
+        let clip = match b.weapon {
+            Weapon::Stock => &sfx.rocket_reload,
+            Weapon::Original => &sfx.original_reload,
+        };
+        play(&mut commands, clip, 0.6);
     }
 }
 

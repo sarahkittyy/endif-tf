@@ -3,6 +3,7 @@
 //! writable) and to `localStorage` on the web.
 
 use bevy::prelude::*;
+use endif_sim::Weapon;
 use serde::{Deserialize, Serialize};
 
 /// TF2 `m_yaw` / `m_pitch`: degrees per mouse count at sensitivity 1.
@@ -317,6 +318,9 @@ pub struct Settings {
     /// delay hides latency and jitter from the opponent's view (fewer, shallower rollbacks on
     /// their side) at the cost of one's own responsiveness.
     pub input_delay: u8,
+    /// Preferred rocket launcher (stock or The Original). Sent with every input; the simulation
+    /// reads it when the player spawns, so a change made mid-life applies at the next spawn.
+    pub weapon: Weapon,
     pub bindings: Bindings,
 }
 
@@ -331,6 +335,7 @@ impl Default for Settings {
             fullscreen: false,
             adaptive_delay: true,
             input_delay: INPUT_DELAY_DEFAULT,
+            weapon: Weapon::Stock,
             bindings: Bindings::default(),
         }
     }
@@ -406,7 +411,14 @@ impl Settings {
             "separate_sensitivity = {}\n",
             self.separate_sensitivity
         ));
-        out.push_str(&format!("invert_y = {}\n\n[audio]\n", self.invert_y));
+        out.push_str(&format!("invert_y = {}\n\n[loadout]\n", self.invert_y));
+        out.push_str(&format!(
+            "rocket_launcher = {}\n\n[audio]\n",
+            match self.weapon {
+                Weapon::Stock => "stock",
+                Weapon::Original => "original",
+            }
+        ));
         out.push_str(&format!("volume = {:.2}\n\n[video]\n", self.volume));
         out.push_str(&format!("fullscreen = {}\n\n[network]\n", self.fullscreen));
         out.push_str(&format!("adaptive_delay = {}\n", self.adaptive_delay));
@@ -454,6 +466,9 @@ impl Settings {
                 "separate_sensitivity" => separate = matches!(v, "true" | "1" | "yes"),
                 "invert_y" => s.invert_y = matches!(v, "true" | "1" | "yes"),
                 "fullscreen" => s.fullscreen = matches!(v, "true" | "1" | "yes"),
+                "rocket_launcher" => {
+                    s.weapon = if v.eq_ignore_ascii_case("original") { Weapon::Original } else { Weapon::Stock }
+                }
                 "adaptive_delay" => s.adaptive_delay = matches!(v, "true" | "1" | "yes"),
                 "input_delay" => {
                     if let Ok(x) = v.parse::<f32>() {
@@ -587,6 +602,17 @@ mod tests {
         s.set_volume(0.333);
         assert_eq!(Settings::from_ini(&s.to_ini()), s);
         assert_eq!(s.volume, 0.33);
+    }
+
+    #[test]
+    fn launcher_round_trips_and_defaults_to_stock() {
+        let mut s = Settings::default();
+        assert_eq!(s.weapon, Weapon::Stock);
+        s.weapon = Weapon::Original;
+        assert_eq!(Settings::from_ini(&s.to_ini()).weapon, Weapon::Original);
+        assert_eq!(Settings::from_ini("[loadout]\nrocket_launcher = Original\n").weapon, Weapon::Original);
+        assert_eq!(Settings::from_ini("[loadout]\nrocket_launcher = whatever\n").weapon, Weapon::Stock);
+        assert_eq!(Settings::from_ini("[audio]\nvolume = 0.50\n").weapon, Weapon::Stock);
     }
 
     #[test]

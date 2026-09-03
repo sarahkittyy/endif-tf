@@ -18,8 +18,8 @@ pub const NUM_PLAYERS: usize = 2;
 /// Events are regenerated every tick and are not needed for determinism.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SimEvent {
-    RocketFired { shooter: u8, rocket_id: u32, origin: Vec3, velocity: Vec3 },
-    Explosion { rocket_id: u32, origin: Vec3, normal: Vec3, hit_player: Option<u8> },
+    RocketFired { shooter: u8, rocket_id: u32, origin: Vec3, velocity: Vec3, weapon: Weapon },
+    Explosion { rocket_id: u32, origin: Vec3, normal: Vec3, hit_player: Option<u8>, weapon: Weapon },
     /// `height` is the victim's height above the ground below; `distance` is how far the rocket
     /// flew from the muzzle to the explosion. `chain` is the attacker's kill chain after the hit:
     /// 0 when it did not kill, 1 for a plain kill, 2 or more when the victim was killed before
@@ -162,6 +162,13 @@ impl SimState {
             self.players[idx].velocity = Vec3::new(cosf(yaw) * speed, sinf(yaw) * speed, 0.0);
         }
         self.players[idx].origin = origin;
+        // Look at the centre floor point from wherever the spawn ended up (a high respawn looks
+        // down at the arena). `vector_angles` wraps to [0, 360); the client convention is
+        // (-180, 180] with pitch clamped, so store it that way.
+        let aim = vector_angles(arena.centre() - self.players[idx].eye_position());
+        let aim = QAngle::new(normalize_yaw(aim.pitch).clamp(-MAX_PITCH, MAX_PITCH), normalize_yaw(aim.yaw), 0.0);
+        self.players[idx].view_angles = aim;
+        self.players[idx].spawn_angles = aim;
         self.players[idx].landed_since_spawn = !high;
         self.events.push(SimEvent::Respawn { player: idx as u8, origin });
     }
@@ -205,6 +212,18 @@ impl SimState {
         }
     }
 
+    /// The first spawns, without advancing time. The client calls this before the first frame so
+    /// there is something to draw; `step` does it on its own otherwise. Players spawned here have
+    /// no input yet, so their launcher is picked on the first stepped tick (`Player::weapon_pending`).
+    pub fn begin(&mut self, arena: &Arena) {
+        if self.phase == Phase::Warmup {
+            self.phase = Phase::Fighting;
+            for i in 0..NUM_PLAYERS {
+                self.respawn(arena, i);
+            }
+        }
+    }
+
     /// Advance the simulation by one tick using the given inputs.
     pub fn step(&mut self, arena: &Arena, inputs: [PlayerInput; NUM_PLAYERS]) {
         self.events.clear();
@@ -212,17 +231,23 @@ impl SimState {
         let curtime = self.curtime();
 
         // First tick: spawn everyone.
-        if self.phase == Phase::Warmup {
-            self.phase = Phase::Fighting;
-            for i in 0..NUM_PLAYERS {
-                self.respawn(arena, i);
-            }
-        }
+        self.begin(arena);
 
         // Respawns.
         for i in 0..NUM_PLAYERS {
             if !self.players[i].alive && self.players[i].respawn_tick <= tick {
                 self.respawn(arena, i);
+            }
+        }
+
+        // A fresh spawn takes the launcher its input asks for (the loadout is read at spawn, as in
+        // TF2 a change made mid-life waits for the next one). Every spawn, `begin`'s included,
+        // is resolved here on the first tick it sees an input. Practice applies it every tick.
+        let instant = self.rules.instant_weapon_switch;
+        for (p, input) in self.players.iter_mut().zip(&inputs) {
+            if p.weapon_pending || instant {
+                p.weapon = Weapon::from_buttons(input.buttons);
+                p.weapon_pending = false;
             }
         }
 
@@ -308,6 +333,7 @@ impl SimState {
             rocket_id: id,
             origin: rocket.origin,
             velocity: rocket.velocity,
+            weapon: rocket.weapon,
         });
         self.rockets.push(rocket);
 
@@ -365,6 +391,7 @@ impl SimState {
             origin: src,
             normal: tr.normal,
             hit_player: hit_player.map(|p| p as u8),
+            weapon: rocket.weapon,
         });
 
         // Blast line of sight must not be blocked by the invisible player walls.

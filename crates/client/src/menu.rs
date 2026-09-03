@@ -28,6 +28,7 @@ use bevy::text::LineBreak;
 use bevy::ui::UiGlobalTransform;
 use bevy::ui::widget::NodeImageMode;
 use bevy::window::PrimaryWindow;
+use endif_sim::Weapon;
 
 /// Which screen is showing.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -155,6 +156,8 @@ enum UiAction {
     Fullscreen,
     /// Let the game pick the input delay from the connection.
     AdaptiveDelay,
+    /// Preferred rocket launcher: stock or The Original (takes effect at the next spawn).
+    Launcher,
     /// Dismiss the "room is full" error: back to the menu with the code cleared.
     ErrorOk,
     /// Dismiss the result popup of a finished ranked match.
@@ -208,6 +211,7 @@ impl UiAction {
             | UiAction::SeparateSensitivity
             | UiAction::Fullscreen
             | UiAction::AdaptiveDelay
+            | UiAction::Launcher
             | UiAction::HistoryFilter
             | UiAction::OpenTab(_) => ButtonStyle::Custom,
             _ => ButtonStyle::Plain,
@@ -734,6 +738,50 @@ fn switch(theme: &Theme, labels: [&str; 2], first: bool, action: UiAction) -> im
 /// YES / NO switch.
 fn toggle(theme: &Theme, on: bool, action: UiAction) -> impl Bundle {
     switch(theme, ["YES", "NO"], on, action)
+}
+
+/// On-screen size of a launcher picture in the launcher switch (`ui/launcher_*.png` are drawn at
+/// twice this, see `tools/tf2/ui_assets.py`).
+const LAUNCHER_ICON_W: f32 = 64.0;
+const LAUNCHER_ICON_H: f32 = 40.0;
+
+fn icon_cell(image: Handle<Image>, active: bool) -> impl Bundle {
+    (
+        Node {
+            width: Val::Px(LAUNCHER_ICON_W + 12.0),
+            height: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border_radius: BorderRadius::all(Val::Px(3.0)),
+            ..default()
+        },
+        BackgroundColor(if active { theme::ORANGE } else { Color::NONE }),
+        children![(
+            ImageNode { image, color: if active { Color::WHITE } else { Color::srgba(1.0, 1.0, 1.0, 0.4) }, ..default() },
+            Node { width: Val::Px(LAUNCHER_ICON_W), height: Val::Px(LAUNCHER_ICON_H), ..default() },
+        )],
+    )
+}
+
+/// Two-way switch between two pictures, square-cornered where `switch` is a pill; the active
+/// side is lit and the other dimmed. `first` picks the left picture.
+fn icon_switch(images: [Handle<Image>; 2], first: bool, action: UiAction) -> impl Bundle {
+    let [left, right] = images;
+    (
+        Button,
+        action,
+        Node {
+            height: Val::Px(LAUNCHER_ICON_H + 16.0),
+            flex_direction: FlexDirection::Row,
+            padding: UiRect::all(Val::Px(2.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(5.0)),
+            ..default()
+        },
+        BackgroundColor(theme::INSET_BG),
+        BorderColor::all(theme::TAN_DARKER),
+        children![icon_cell(left, first), icon_cell(right, !first)],
+    )
 }
 
 // ------------------------------------------------------------------------------------ screens
@@ -1965,6 +2013,15 @@ fn spawn_settings(
                     },
                 ));
 
+                c.spawn(section(theme, "loadout"));
+                row(c, theme, "Preferred rocket launcher", |b| {
+                    b.spawn(icon_switch(
+                        [theme.launcher_stock.clone(), theme.launcher_original.clone()],
+                        s.weapon == Weapon::Stock,
+                        UiAction::Launcher,
+                    ));
+                });
+
                 c.spawn(section(theme, "audio"));
                 row(c, theme, "Volume", |b| {
                     slider_controls(b, theme, s, Slider::Volume, SLIDER_W)
@@ -2981,6 +3038,14 @@ fn perform(action: UiAction, ctx: &mut MenuCtx) {
         UiAction::AdaptiveDelay => {
             commit_edit(&mut ctx.editing, &mut ctx.settings);
             ctx.settings.adaptive_delay = !ctx.settings.adaptive_delay;
+            ctx.settings.save();
+            ctx.refresh.0 = true;
+        }
+        UiAction::Launcher => {
+            ctx.settings.weapon = match ctx.settings.weapon {
+                Weapon::Stock => Weapon::Original,
+                Weapon::Original => Weapon::Stock,
+            };
             ctx.settings.save();
             ctx.refresh.0 = true;
         }

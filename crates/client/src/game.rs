@@ -10,12 +10,12 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 use bevy_ggrs::prelude::*;
 use bevy_ggrs::{LocalInputs, LocalPlayers, RollbackFrameCount, RunGgrsSystems};
-use endif_sim::math::normalize_yaw;
+use endif_sim::math::{normalize_yaw, QAngle};
 use crate::menu::UiScreen;
 use crate::settings::{Action, Settings};
 use endif_sim::{
-    Arena, IN_ATTACK, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, MAX_PITCH, NUM_PLAYERS, PlayerInput,
-    Rules, SimEvent, SimState,
+    Arena, IN_ATTACK, IN_BACK, IN_DUCK, IN_FORWARD, IN_JUMP, IN_MOVELEFT, IN_MOVERIGHT, IN_WEAPON_ORIGINAL, MAX_PITCH, NUM_PLAYERS,
+    PlayerInput, Rules, SimEvent, SimState, Weapon,
 };
 
 /// The simulation, registered for rollback + checksums.
@@ -258,11 +258,15 @@ fn setup_match(
     seed: Res<MatchSeed>,
     arena: Res<ArenaRes>,
     time: Res<Time<Real>>,
+    kind: Option<Res<crate::net::MatchKind>>,
     pending: Option<ResMut<crate::net::PendingSession>>,
 ) {
-    let mut sim = SimState::new(seed.0, Rules::default());
-    // Run the spawn tick so the first rendered frame has players.
-    sim.step(&arena.0, [PlayerInput::default(); 2]);
+    // Nobody dies in practice, so a launcher change would never arrive: apply it at once there.
+    let practice = matches!(kind.as_deref(), Some(crate::net::MatchKind::Practice));
+    let mut sim = SimState::new(seed.0, Rules { instant_weapon_switch: practice, ..Rules::default() });
+    // Spawn everyone so the first rendered frame has players; the launchers are picked from the
+    // first inputs GGRS delivers.
+    sim.begin(&arena.0);
     // Face the local player toward the arena centre; the live look angles start from the spawn angles.
     commands.insert_resource(RenderStates { prev: sim.clone(), cur: sim.clone(), last_advance: time.elapsed_secs_f64() });
     commands.insert_resource(PendingFx::default());
@@ -331,16 +335,22 @@ fn accumulate_look(
     mut look: ResMut<LookAngles>,
     states: Option<Res<RenderStates>>,
     local: Res<LocalHandle>,
-    mut initialised: Local<bool>,
+    mut last_spawn: Local<Option<(u32, QAngle)>>,
     mut was_captured: Local<bool>,
     mut filter: Local<SpikeFilter>,
 ) {
-    // Start from the spawn angles the first time.
-    if !*initialised && let Some(s) = states.as_ref() {
+    // Every spawn (the first one included) points the view at the arena centre. The simulation
+    // cannot hold the facing itself: the spawn tick's input overwrites it at once, so the live
+    // look angles are re-seeded from `spawn_angles` whenever a new spawn shows up in the current
+    // state. A rollback that moves the spawn elsewhere changes the angles too and re-seeds again.
+    if let Some(s) = states.as_ref() {
         let p = &s.cur.players[local.0];
-        look.pitch = p.view_angles.pitch;
-        look.yaw = p.view_angles.yaw;
-        *initialised = true;
+        let key = (p.spawn_tick, p.spawn_angles);
+        if *last_spawn != Some(key) {
+            look.pitch = p.spawn_angles.pitch;
+            look.yaw = p.spawn_angles.yaw;
+            *last_spawn = Some(key);
+        }
     }
     // Motion from before the capture (moving the free cursor over to click) must not turn the view,
     // so the events are read individually and discarded while uncaptured and on the capture frame.
@@ -395,6 +405,11 @@ fn read_local_inputs(
                         buttons |= bit;
                     }
                 }
+            }
+            // The launcher preference is not a key: it travels with every input, menu open or
+            // not, and the simulation applies it at the next spawn.
+            if settings.weapon == Weapon::Original {
+                buttons |= IN_WEAPON_ORIGINAL;
             }
             PlayerInput { buttons, pitch: look.pitch, yaw: look.yaw }
         } else {
