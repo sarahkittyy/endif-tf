@@ -14,6 +14,12 @@
 //! the page for that long with the loading bar stuck. One step per frame means one or two links per
 //! frame, with the loading screen repainted and progress reported in between: `WarmupProgress`
 //! feeds the steps into the loading screen's count (`loading.rs`).
+//!
+//! A pipeline variant is keyed on more than the material: the mesh's vertex layout (a quad with
+//! vertex colours and one without are two pipelines) and the view's settings (fog, HDR, MSAA,
+//! prepasses...) are part of the key too. So each step here uses the same mesh kind as the thing
+//! it stands in for, the cameras match the match cameras exactly, and no match kind adds
+//! camera-level effects (`render.rs`).
 
 use crate::assets::{GameAssets, SPRITE_ADDITIVE, SPRITE_COUNT};
 use crate::loading::{elapsed_secs, settled};
@@ -43,8 +49,8 @@ const SCENE_POS: [Vec3; SCENES] = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 1.0
 /// Arena surfaces: floor, wall.
 const SURFACES: usize = 2;
 /// Spawn steps, one per frame: cameras, lights, the scenes, the surfaces, the emissive line, the
-/// scorch decal, the particle sprites.
-const STEPS: u32 = (2 + SCENES + SURFACES + 2 + SPRITE_COUNT) as u32;
+/// scorch decal, the gallery's glass, the particle sprites.
+const STEPS: u32 = (2 + SCENES + SURFACES + 3 + SPRITE_COUNT) as u32;
 
 /// Present once the warm-up scene has been rendered.
 #[derive(Resource)]
@@ -65,6 +71,7 @@ enum Step {
     Surface(usize),
     Emissive,
     Scorch,
+    Glass,
     Sprite(usize),
 }
 
@@ -91,6 +98,10 @@ fn step(mut i: usize) -> Step {
     i -= 1;
     if i == 0 {
         return Step::Scorch;
+    }
+    i -= 1;
+    if i == 0 {
+        return Step::Glass;
     }
     Step::Sprite(i - 1)
 }
@@ -127,6 +138,8 @@ impl Plugin for WarmupPlugin {
     }
 }
 
+/// A quad with the particle layers' vertex layout (`particles::empty_mesh`): position, normal,
+/// UV and colour.
 fn quad(size: f32) -> Mesh {
     let h = size * 0.5;
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
@@ -145,7 +158,7 @@ fn surface(assets: &GameAssets, i: usize) -> &Handle<Image> {
 /// Whether the assets a step draws have arrived (or failed, which must not hold the screen up).
 fn ready(step: Step, server: &AssetServer, assets: &GameAssets) -> bool {
     match step {
-        Step::Cameras | Step::Lights | Step::Emissive => true,
+        Step::Cameras | Step::Lights | Step::Emissive | Step::Glass => true,
         // Resolved from the loaded file, or the file failed (then the step is skipped).
         Step::Scene(i) => assets.scene(i).is_some() || settled(server, assets.gltf(i).id()),
         Step::Surface(i) => settled(server, surface(assets, i).id()),
@@ -286,11 +299,12 @@ fn spawn_step(
                 layer,
             ));
         }
-        // Scorch decal (multiply blend).
+        // Scorch decal (multiply blend) on a `Rectangle` like the match's burn marks (`render.rs`):
+        // it has no vertex colours, so the sprite quad's pipeline would not be the one they need.
         Step::Scorch => {
             commands.spawn((
                 WarmupEntity,
-                Mesh3d(shared.quad.clone()),
+                Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color_texture: Some(assets.scorch.clone()),
                     alpha_mode: AlphaMode::Multiply,
@@ -302,6 +316,26 @@ fn spawn_step(
                 })),
                 NotShadowCaster,
                 Transform::from_xyz(0.0, 0.5, 2.0),
+                layer,
+            ));
+        }
+        // The gallery's glass platform (`fruit.rs`): a lit, alpha-blended, back-face-culled
+        // material on a cuboid. The sprites are the only other blend, and they are unlit on a
+        // coloured quad with culling off, so this is its own pipeline.
+        Step::Glass => {
+            commands.spawn((
+                WarmupEntity,
+                Mesh3d(shared.slab.clone()),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgba(1.0, 1.0, 1.0, 0.72),
+                    base_color_texture: Some(assets.floor.clone()),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 0.25,
+                    reflectance: 0.6,
+                    ..default()
+                })),
+                NotShadowCaster,
+                Transform::from_xyz(0.0, 0.3, 0.0),
                 layer,
             ));
         }

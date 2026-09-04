@@ -1,4 +1,4 @@
-//! The Fruit Ninja gallery, client side: its scene (a glass platform on a pole over a foggy void,
+//! The Fruit Ninja gallery, client side: its scene (a glass platform on a pole over the void,
 //! a wooden wall in front sized to the soldiers' bounds), the flying soldiers' models (grey
 //! ragdolls once hit), the floating options frame, the score strip with the local records, the
 //! round result and the reset countdown. The rules and the state live in `endif_sim::fruit`; the options reach the
@@ -10,14 +10,13 @@ use crate::game::{PendingFx, RenderStates};
 use crate::menu::{no_wrap, slider_controls};
 use crate::net::{LocalHandle, MatchKind};
 use crate::player_model::{self, TargetPose, TargetPoses};
-use crate::render::{SKY, TICK_SECS, UNIT, interp_alpha, to_bevy};
+use crate::render::{TICK_SECS, UNIT, interp_alpha, to_bevy};
 use crate::settings::{Settings, Slider, storage};
 use crate::theme::{self, Theme};
 use crate::{AppState, GameEntity};
 use bevy::ecs::relationship::RelatedSpawnerCommands;
 use bevy::light::NotShadowCaster;
 use bevy::math::Affine2;
-use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
@@ -29,11 +28,10 @@ use endif_sim::fruit::{self as rules, Difficulty, MAX_TARGETS, Preset, ROUND_SIZ
 pub const FALL_RESPAWN_TICKS: u32 = 40;
 /// Height of a standing soldier's hull centre above its feet: the target models tumble about it.
 const BODY_CENTRE: f32 = 41.0;
-/// Where the void turns to sky, in metres from the camera: the wall at its farthest preset
-/// (1100 units, 28 m) stays clear, the pole is gone well before its end.
-const FOG_START: f32 = 40.0;
-const FOG_END: f32 = 130.0;
-/// How far the pole reaches down (units); its end is deep in the fog.
+/// How far the pole reaches down (units): far enough that its end is a speck against the sky.
+/// (There is no fog to hide it: distance fog is part of Bevy's view pipeline key, so a fogged
+/// camera needs its own copy of every shader the match uses, which the warm-up does not build and
+/// which on the web relinked one by one on the gallery's first open, first soldier, first rocket.)
 const POLE_LENGTH: f32 = 6000.0;
 /// The wall slab's depth and its border beams' size and how far they stand proud of the face.
 const WALL_SLAB: f32 = 64.0;
@@ -278,17 +276,6 @@ enum OptionButton {
     Rounds(bool),
 }
 
-/// Fog for the gallery's camera: the sky's haze colour, so the pole and anything that falls
-/// fade out.
-pub fn fog() -> DistanceFog {
-    DistanceFog {
-        color: SKY,
-        directional_light_color: Color::NONE,
-        directional_light_exponent: 8.0,
-        falloff: FogFalloff::Linear { start: FOG_START, end: FOG_END },
-    }
-}
-
 /// Bevy's cuboid lays UVs on its ±X faces with u along the height, so a texture meant to cover
 /// `width` by `height` units on a face that looks along x needs its axes swapped.
 fn x_face_uv(width: f32, height: f32) -> Affine2 {
@@ -355,7 +342,7 @@ pub fn spawn_arena(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials
         ));
     }
 
-    // The hub the platform sits on and the pole into the fog. The pipe texture goes once around
+    // The hub the platform sits on and the pole into the void. The pipe texture goes once around
     // the pole and repeats down its length.
     let metal_pole = materials.add(StandardMaterial {
         base_color_texture: Some(tex.metal_pole.clone()),

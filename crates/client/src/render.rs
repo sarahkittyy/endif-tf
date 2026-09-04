@@ -24,7 +24,7 @@ use endif_sim::{SimEvent, SimState};
 pub const UNIT: f32 = 0.0254;
 
 /// The haze at the skybox's horizon (`tools/tf2/skybox.py` prints it): the clear colour behind
-/// the sky, and what the gallery's fog fades into.
+/// the sky.
 pub const SKY: Color = Color::srgb_u8(155, 139, 139);
 /// The skybox is an LDR picture; this is the luminance its white is shown at.
 const SKY_BRIGHTNESS: f32 = 200.0;
@@ -214,7 +214,9 @@ fn setup_scene(
         burn_mat,
     });
 
-    // Camera + viewmodel. The gallery hangs over a void: fog swallows the pole's lower end.
+    // Camera + viewmodel. The same view settings for every match kind: a camera-level change
+    // (fog, HDR, MSAA...) is a different pipeline key, and only the variants the warm-up
+    // (`warmup.rs`) draws are compiled before the loading screen goes.
     let mut camera = commands.spawn((
         GameEntity,
         MainCamera,
@@ -233,9 +235,6 @@ fn setup_scene(
         brightness: SKY_BRIGHTNESS,
         rotation: Quat::IDENTITY,
     });
-    if fruit {
-        camera.insert(crate::fruit::fog());
-    }
     let camera = camera.id();
     viewmodel::spawn(&mut commands, camera, &assets, local.0 == 1);
 }
