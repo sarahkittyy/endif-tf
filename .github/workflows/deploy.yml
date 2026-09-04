@@ -84,8 +84,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-${{ matrix.name }}-v2
-          cache-on-failure: true
+          key: desktop-${{ matrix.name }}-v3
+          cache-on-failure: false
 
       - name: Linux build dependencies
         if: matrix.name == 'linux'
