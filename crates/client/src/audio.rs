@@ -183,7 +183,8 @@ impl Plugin for AudioFxPlugin {
         app.init_resource::<Sfx>()
             .init_resource::<Delayed>()
             .add_systems(PreUpdate, apply_volume)
-            .add_systems(OnEnter(AppState::InGame), (stop_music, match_start.run_if(ready)))
+            // Fruit Ninja opens on its own countdown instead (`fruit::setup`).
+            .add_systems(OnEnter(AppState::InGame), (stop_music, match_start.run_if(ready.and_then(not(crate::fruit::in_gallery)))))
             .add_systems(OnExit(AppState::InGame), clear_delayed)
             .add_systems(OnEnter(AppState::Connecting), (|mut c: Commands, sfx: Res<Sfx>| play(&mut c, &sfx.join, 0.45)).run_if(ready))
             .add_systems(

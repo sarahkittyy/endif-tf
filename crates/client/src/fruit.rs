@@ -72,7 +72,7 @@ impl Plugin for FruitPlugin {
     }
 }
 
-fn in_gallery(kind: Option<Res<MatchKind>>) -> bool {
+pub fn in_gallery(kind: Option<Res<MatchKind>>) -> bool {
     matches!(kind.as_deref(), Some(MatchKind::FruitNinja))
 }
 
@@ -457,10 +457,13 @@ fn setup(
     settings: Res<Settings>,
     assets: Res<GameAssets>,
     window: Query<&Window, With<PrimaryWindow>>,
+    time: Res<Time<Real>>,
     mut poses: ResMut<TargetPoses>,
     mut countdown: ResMut<Countdown>,
 ) {
-    *countdown = Countdown::default();
+    // The gallery opens on the countdown (in place of the "Begin!" line a match starts on, see
+    // `audio::match_start`): the soldiers come in with it.
+    countdown.start(time.elapsed_secs_f64());
     poses.0 = vec![None; MAX_TARGETS];
     // The soldier pool: one model per slot, parented at the hull centre so a hit one can tumble.
     for slot in 0..MAX_TARGETS as u8 {
