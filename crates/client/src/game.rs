@@ -164,10 +164,16 @@ impl PendingFx {
 /// confirmed frame are final. GGRS numbers a frame by the inputs it consumes while
 /// `RollbackFrameCount` numbers the state those inputs produce, hence the `+ 1`. A sync-test
 /// session has no remote inputs to wait for.
+///
+/// GGRS's confirmed frame counts the local inputs too, which are stamped ahead by the input delay,
+/// so when the peer runs ahead of us (after a hitch here, or on a very low ping) it points past
+/// the frame we have simulated. Released through unclamped, `released` would jump ahead of the
+/// pending buffer and every later frame would be dropped as "already released": no kill feed,
+/// no round banner and no result report until we caught back up. Clamp to what exists.
 fn release_confirmed_fx(mut fx: ResMut<PendingFx>, session: Option<Res<Session<Config>>>, frame: Option<Res<RollbackFrameCount>>) {
     let Some(frame) = frame else { return };
     let through = match session.as_deref() {
-        Some(Session::P2P(s)) => s.confirmed_frame() + 1,
+        Some(Session::P2P(s)) => (s.confirmed_frame() + 1).min(i32::from(*frame)),
         _ => i32::from(*frame),
     };
     fx.release(through);
